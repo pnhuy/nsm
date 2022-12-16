@@ -1,6 +1,6 @@
 from torch.utils.data import Dataset
 import pymskt as mskt
-from .utils import vtk_to_torch, normalize_mesh
+from GenerativeAnatomy.utils import vtk_to_torch, normalize_mesh
 import diffusion_net
 import torch
 from torch.utils.data import DataLoader

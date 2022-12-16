@@ -6,7 +6,7 @@ sys.path.append('/bmrNAS/people/aagatti/programming/PyTorch-VAE/')
 from torch.nn import functional as F
 from models.types_ import *
 from .diffusion_layers import DiffusionNetEncoder
-from .utils import assd
+from GenerativeAnatomy.utils import assd
 try:
     from pytorch3d.loss import chamfer_distance
     _chamfer_ = True
