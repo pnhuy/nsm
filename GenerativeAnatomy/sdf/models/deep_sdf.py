@@ -17,6 +17,7 @@ class Decoder(nn.Module):
         self,
         latent_size,
         dims,
+        n_objects=1,
         dropout=None,
         dropout_prob=0.0,
         norm_layers=(),
@@ -30,6 +31,7 @@ class Decoder(nn.Module):
         """
         latent_size (int): size of the latent input vector to the decoder network
         dims (list of ints): list containing the size of each layer in MLP. 
+        n_objects (int): number of objects to predict
         dropout (list of ints): where to apply dropout to the encoder
         dropout_prob (float) : probability with which dropout is applied
         norm_layers (list of ints): where to apply weightnorm/batchnorm to the decoder
@@ -51,7 +53,10 @@ class Decoder(nn.Module):
         # 0: input
         # 1 to N-hidden: NN
         # -1: output
-        dims = [latent_size + 3] + dims + [1]
+        if n_objects == 1:
+            dims = [latent_size + 3] + dims + [1]
+        else:
+            dims = [latent_size + 3] + dims + [n_objects]
 
         self.num_layers = len(dims)
         self.norm_layers = norm_layers

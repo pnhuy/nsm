@@ -97,15 +97,25 @@ def save_latent_vectors(config, epoch, latent_vec, latent_codes_subdir="latent_c
     )
 
 def save_model(config, epoch, decoder, model_subdir="model"):
-    filename = f'{epoch}.pth'
-    folder_save = os.path.join(config['experiment_directory'], model_subdir)
-    if not os.path.exists(folder_save):
-        os.makedirs(folder_save, exist_ok=True)
+    if type(decoder) not in (list, tuple):
+        decoder = [decoder]
     
-    torch.save(
-        {"epoch": epoch, "model": decoder.state_dict()},
-        os.path.join(folder_save, filename),
-    )
+    filename = f'{epoch}.pth'
+    
+    for decoder_idx, decoder_ in enumerate(decoder):
+        if len(decoder) > 1:
+            model_subdir_ = model_subdir + f'_{decoder_idx}'
+        else:
+            model_subdir_ = model_subdir
+            
+        folder_save = os.path.join(config['experiment_directory'], model_subdir_)
+        if not os.path.exists(folder_save):
+            os.makedirs(folder_save, exist_ok=True)
+        
+        torch.save(
+            {"epoch": epoch, "model": decoder.state_dict()},
+            os.path.join(folder_save, filename),
+        )
 
 def get_checkpoints(config):
     checkpoints = list(
@@ -133,33 +143,26 @@ def get_latent_vecs(num_objects, config):
     return lat_vecs
 
 def get_optimizer(model, latent_vecs, lr_schedules, optimizer="Adam",):
+    if type(model) not in (list, tuple):
+        model = [model]
+    
+    list_params = [
+        {
+            "params": latent_vecs.parameters(),
+            "lr": lr_schedules[1].get_learning_rate(0),
+        }
+    ]
+    for model_ in models:
+        list_params.append(
+            {
+                "params": model_.parameters(),
+                "lr": lr_schedules[0].get_learning_rate(0),
+            }
+        )
+
     if optimizer == "Adam":
-        optimizer = torch.optim.Adam(
-            [
-                {
-                    "params": model.parameters(),
-                    "lr": lr_schedules[0].get_learning_rate(0),
-                },
-                {
-                    "params": latent_vecs.parameters(),
-                    "lr": lr_schedules[1].get_learning_rate(0),
-                },
-            ]
-        )
+        optimizer = torch.optim.Adam(list_params)
     elif optimizer == "AdamW":
-        optimizer = torch.optim.AdamW(
-            [
-                {
-                    "params": model.parameters(),
-                    "lr": lr_schedules[0].get_learning_rate(0),
-                    "weight_decay": 0.0001,
-                },
-                {
-                    "params": latent_vecs.parameters(),
-                    "lr": lr_schedules[1].get_learning_rate(0),
-                    "weight_decay": 0.0001,
-                },
-            ]
-        )
+        optimizer = torch.optim.AdamW(list_params, weight_decay=0.0001)
 
     return optimizer

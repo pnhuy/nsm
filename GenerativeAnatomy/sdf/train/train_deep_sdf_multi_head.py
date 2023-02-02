@@ -19,14 +19,15 @@ loss_l1 = torch.nn.L1Loss(reduction='none')
 
 def train_deep_sdf(
     config, 
-    model, 
+    models: tuple,
     sdf_dataset, 
     use_wandb=False):    
 
     config['checkpoints'] = get_checkpoints(config)
     config['lr_schedules'] = get_learning_rate_schedules(config)
 
-    model = model.to(config['device'])
+    for model in models:
+        model = model.to(config['device'])
 
     if use_wandb is True:
         wandb.login(key=os.environ['WANDB_KEY'])
@@ -39,7 +40,7 @@ def train_deep_sdf(
             name=config['run_name'],
             tags=config['tags']
         )
-        wandb.watch(model, log='all')
+        wandb.watch(models, log='all')
 
 
     data_loader = torch.utils.data.DataLoader(
@@ -52,9 +53,7 @@ def train_deep_sdf(
 
     latent_vecs = get_latent_vecs(len(data_loader.dataset), config)
 
-    
-
-    optimizer = get_optimizer(model, latent_vecs, config['lr_schedules'], config["optimizer"])
+    optimizer = get_optimizer(models, latent_vecs, config['lr_schedules'], config["optimizer"])
 
     for epoch in range(1, config['n_epochs'] + 1):
         # not passing latent_vecs because presumably they are being tracked by the
@@ -70,16 +69,18 @@ def train_deep_sdf(
             save_model(
                 config=config,
                 epoch=epoch,
-                decoder=model,
+                decoder=models,
             )
             if ('val_paths' in config) & (config['val_paths'] is not None):
-                dict_loss = get_mean_errors(
-                    mesh_paths=config['val_paths'],
-                    decoder=model,
-                    latent_size=config['latent_size'],
-                    calc_symmetric_chamfer=config['chamfer'],
-                    calc_emd=config['emd'],
-                )
+                list_dict_loss = []
+                for model_idx, model in enumerate(models):
+                    dict_loss = get_mean_errors(
+                        mesh_paths=config['val_paths'],
+                        decoder=model,
+                        latent_size=config['latent_size'],
+                        calc_symmetric_chamfer=config['chamfer'],
+                        calc_emd=config['emd'],
+                    )
 
                 log_dict.update(dict_loss)
 
@@ -108,7 +109,7 @@ def calc_weight(epoch, n_epochs, schedule, cooldown=None):
 
 
 def train_epoch(
-    model, 
+    models, 
     data_loader,
     latent_vecs,
     optimizer,
@@ -117,8 +118,10 @@ def train_epoch(
     return_loss=True,
     verbose=False,
 ):
+    n_surfaces = len(models)
     start = time.time()
-    model.train()
+    for model in models:
+        model.train()
 
     adjust_learning_rate(config['lr_schedules'], optimizer, epoch)
     
@@ -134,29 +137,40 @@ def train_epoch(
             print('sdf index size:', indices.size())
             print('sdf data size:', sdf_data.size())
         
-        sdf_data = sdf_data.reshape(-1, 4)
+        sdf_data = sdf_data.reshape(-1, 3 + n_surfaces)
 
         num_sdf_samples = sdf_data.shape[0]
         sdf_data.requires_grad = False
 
         xyz = sdf_data[:, :3]
-        sdf_gt = sdf_data[:, 3].unsqueeze(1)
-
-        if config['enforce_minmax'] is True:
-            sdf_gt = torch.clamp(sdf_gt, -config['clamp_dist'], config['clamp_dist'])
+        assert sdf_data.shape[-1] == (n_surfaces + 3) # make sure we have one SDF value per object
+        
+        sdf_gt = []
+        for surf_idx in range(n_surfaces):
+            sdf_gt_ = sdf_data[:, 3 + surf_idx].unsqueeze(1)
+            if config['enforce_minmax'] is True:
+                sdf_gt_ = torch.clamp(sdf_gt_, -config['clamp_dist'], config['clamp_dist'])
+            sdf_gt.append(sdf_gt_)
 
         xyz = torch.chunk(xyz, config['batch_split'])
         indices = torch.chunk(
             indices.unsqueeze(-1).repeat(1, config['samples_per_object_per_batch']).view(-1), #repeat the index for every sample
             config['batch_split'], # split the data into the appropriate number of batches - so can fit in ram. 
         )
-        sdf_gt = torch.chunk(sdf_gt, config['batch_split'])
+
+        for surf_idx in range(n_surfaces):
+            sdf_gt[surf_idx] = torch.chunk(sdf_gt[surf_idx], config['batch_split'])
 
         batch_loss = 0.0
         batch_l1_loss = 0.0
         batch_code_reg_loss = 0.0
 
         optimizer.zero_grad()
+
+        # I'VE DONE UP TO HERE
+        # THE sdf_gt should have SDF values for each object being jointly optimized. 
+        # Now need to make sure appropriate model is applied and getting the appropriate SDFs
+        # In the following. 
 
         for split_idx in range(config['batch_split']):
             if verbose is True:
@@ -166,23 +180,36 @@ def train_epoch(
             inputs = torch.cat([batch_vecs, xyz[split_idx]], dim=1)
             inputs = inputs.to(config['device'])
 
-            pred_sdf = model(inputs)
+            pred_sdfs = []
+            for model in models:
+                pred_sdf = model(inputs)
+                if config['enforce_minmax'] is True:
+                    pred_sdf = torch.clamp(pred_sdf, -config['clamp_dist'], config['clamp_dist'])
+                pred_sdfs.append(pred_sdf)                       
 
-            if config['enforce_minmax'] is True:
-                pred_sdf = torch.clamp(pred_sdf, -config['clamp_dist'], config['clamp_dist'])
-            
-            l1_loss = loss_l1(pred_sdf, sdf_gt[split_idx].cuda()) 
+            l1_losses = []
+            for surf_idx, pred_sdf in enumerate(pred_sdfs):
+                l1_losses.append(loss_l1(pred_sdf, sdf_gt[surf_idx][split_idx].cuda()))
+            # l1_loss = loss_l1(pred_sdf, sdf_gt[split_idx].cuda())
+
+            if 'multi_object_overlap' in config and config['multi_object_overlap'] is True:
+                raise Exception('Not implemented yet')
+                # Should add some weighted penalty to the l1 loss
+                # this is similar to surface_accuracy_e below
+                # The idea being - the signs of the objects should never have 2 objects as (-) becuase it 
+                # means one object is inside the other.
+                # However, we dont want there to be any gaps between them - so we need to be intelligent about 
+                # how to penalize this so that it doesnt end up with weird artefacts.
             
             # curriculum SDF equation 5
             # progressively fine-tune the regions of surface cared about by the network. 
             if config['surface_accuracy_e'] is not None:
                 weight_schedule = 1 - calc_weight(epoch, config['n_epochs'], config['surface_accuracy_schedule'], config['surface_accuracy_cooldown'])
-                l1_loss = torch.maximum(
-                    l1_loss - (weight_schedule * config['surface_accuracy_e']),
-                    torch.zeros_like(l1_loss)
-                )
-
-            l1_loss = l1_loss / num_sdf_samples
+                for l1_idx, l1_loss in enumerate(l1_losses):
+                    l1_losses[l1_idx] = torch.maximum(
+                        l1_loss - (weight_schedule * config['surface_accuracy_e']),
+                        torch.zeros_like(l1_loss)
+                    )
             
             # curriculum SDF equation 6
             # progressively fine-tune the regions of surface cared about by the network.
@@ -190,18 +217,35 @@ def train_epoch(
             if config['sample_difficulty_weight'] is not None:
                 weight_schedule = calc_weight(epoch, config['n_epochs'], config['sample_difficulty_weight_schedule'], config['sample_difficulty_cooldown'])
                 difficulty_weight = weight_schedule * config['sample_difficulty_weight']
-                error_sign = torch.sign(sdf_gt[split_idx].cuda() - pred_sdf)
-                sdf_gt_sign = torch.sign(sdf_gt[split_idx].cuda())
-                sample_weights = 1 + difficulty_weight * sdf_gt_sign * error_sign
-                l1_loss = l1_loss * sample_weights
+                for surf_idx, surf_gt_ in enumerate(sdf_gt):
+                    # Weights points independently
+                    # so, if hard for one surface - then we weight it heavily, but if
+                    # easy for another surface - then we weight it less.
+                    error_sign = torch.sign(surf_gt_[split_idx].cuda() - pred_sdfs[surf_idx])
+                    sdf_gt_sign = torch.sign(surf_gt_[split_idx].cuda())
+                    sample_weights = 1 + difficulty_weight * sdf_gt_sign * error_sign
+                    l1_losses[surf_idx] = l1_losses[surf_idx] * sample_weights
             elif config['sample_difficulty_lx'] is not None:
                 weight_schedule = calc_weight(epoch, config['n_epochs'], config['sample_difficulty_lx_schedule'], config['sample_difficulty_lx_cooldown'])
-                difficulty_weight = 1 / (l1_loss ** config['sample_difficulty_lx']  + config['sample_difficulty_lx_epsilon'])
-                difficulty_weight = difficulty_weight * weight_schedule
-                l1_loss = l1_loss * difficulty_weight
+                for surf_idx, surf_gt_ in enumerate(sdf_gt):
+                    difficulty_weight = 1 / (l1_losses[surf_idx] ** config['sample_difficulty_lx']  + config['sample_difficulty_lx_epsilon'])
+                    difficulty_weight = difficulty_weight * weight_schedule
+                    l1_losses[surf_idx] = l1_losses[surf_idx] * difficulty_weight
             
+            # Weight each surface loss by the number of samples it has
+            # so that the sum of them all is the same as the mean loss. 
+            for idx, l1_loss_ in enumerate(l1_losses):
+                l1_losses[idx] = l1_loss_ / num_sdf_samples
+            # l1_loss = l1_loss / num_sdf_samples
+
+            # Comput total loss for each mesh (which is the same as the 
+            # mean).
+            l1_loss = 0
+            for l1_loss_ in l1_losses:
+                l1_loss += l1_loss_.sum()
             
-            l1_loss = l1_loss.sum()
+            # Normalize by number of surfaces
+            l1_loss = l1_loss / len(l1_losses)
             
             batch_l1_loss += l1_loss.item()
             chunk_loss = l1_loss

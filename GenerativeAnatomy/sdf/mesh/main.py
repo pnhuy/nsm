@@ -8,27 +8,67 @@ import os
 import torch
 import numpy as np
 import pymskt as mskt
+import vtk
 
 from GenerativeAnatomy.sdf.datasets import norm
 
-def scale_mesh(new_mesh, old_mesh, scale_method='max_rad'):
-    if type(old_mesh) is str:
-        old_mesh = mskt.mesh.io.read_vtk(old_mesh)
-    old_pts = mskt.mesh.get_mesh_physical_point_coords(old_mesh)
-    new_pts = mskt.mesh.get_mesh_physical_point_coords(new_mesh)
-
-    mean_old = np.mean(old_pts, axis=0)
-    old_pts -= mean_old
-
-    if scale_method == 'max_rad':
-        scale = np.max(norm(old_pts), axis=-1)
-        new_pts *= scale
+def scale_mesh_(mesh, scale=1.0, offset=(0., 0., 0.), icp_transform=None):
+    if not issubclass(type(mesh), mskt.mesh.Mesh):
+        mesh = mskt.mesh.Mesh(mesh)
     
-    else:
-        raise NotImplementedError
-    new_pts += mean_old
+    print('scale', scale)
 
-    mskt.mesh.meshTools.set_mesh_physical_point_coords(new_mesh, new_pts)
+    pts = mesh.point_coords * scale
+    pts += offset
+
+    mesh.point_coords = pts
+
+    if icp_transform is not None:
+        transform = vtk.vtkTransform()
+        transform.SetMatrix(icp_transform.GetMatrix())
+        transform.Inverse()
+        print(icp_transform)
+        # # icp_transform.Inverse()
+        print('INVERSE')
+        print(transform)
+        mesh.apply_transform_to_mesh(transform)
+    
+    return mesh
+
+def scale_mesh(
+    new_mesh, 
+    old_mesh=None, 
+    scale=1.0,
+    offset=(0., 0., 0.),
+    scale_method='max_rad',
+    icp_transform=None
+    ):
+
+    if old_mesh is not None:
+        old_mesh = mskt.mesh.Mesh(old_mesh) # should handle vtk, pyvista, or string path to file
+        old_pts = old_mesh.point_coords
+
+        if not issubclass(type(new_mesh), mskt.mesh.Mesh):
+            new_mesh = mskt.mesh.Mesh(new_mesh) # should handle vtk, pyvista, or string path to file
+        new_pts = new_mesh.point_coords
+
+        offset = np.mean(old_pts, axis=0)
+        old_pts -= mean_old
+
+        if scale_method == 'max_rad':
+            scale = np.max(norm(old_pts), axis=-1)    
+        else:
+            raise NotImplementedError
+    
+    mesh = scale_mesh_(new_mesh, scale=scale, offset=offset, icp_transform=icp_transform)
+    return mesh
+
+def apply_similarity_transform(mesh, R, t, s):
+    pts = mskt.mesh.get_mesh_physical_point_coords(mesh)
+    pts += t
+    pts = pts * s
+    pts = (R @ pts.T).T
+    mskt.mesh.meshTools.set_mesh_physical_point_coords(mesh, pts)
 
 def create_mesh(
     decoder,
@@ -37,12 +77,16 @@ def create_mesh(
     voxel_origin=(-1, -1, -1),
     voxel_size=None,
     batch_size=32**3,
-    scale=None,
-    offset=None,
+    scale=1.0,
+    offset=(0., 0., 0.),
     path_save=None,
     filename='mesh.vtk',
     path_original_mesh=None,
-    scale_to_original_mesh=True
+    scale_to_original_mesh=True,
+    R=None,
+    t=None,
+    s=None,
+    icp_transform=None
 ):
 
     if voxel_size is None:
@@ -57,13 +101,18 @@ def create_mesh(
     sdf_values = sdf_values.reshape(n_pts_per_axis, n_pts_per_axis, n_pts_per_axis)
 
     # create mesh from gridded SDFs
-    mesh = sdf_grid_to_mesh(sdf_values, voxel_origin, voxel_size, scale, offset)
+    mesh = sdf_grid_to_mesh(sdf_values, voxel_origin, voxel_size)
 
-    if (path_original_mesh is not None) and scale_to_original_mesh:
-        scale_mesh(mesh, path_original_mesh)
+    if (R is True) & (s is True) & (t is True):
+        apply_similarity_transform(mesh, R, t, s)
+
+    elif scale_to_original_mesh:
+        print('Scaling mesh to original mesh... ')
+        print(icp_transform)
+        mesh = scale_mesh(mesh, old_mesh=path_original_mesh, scale=scale, offset=offset, icp_transform=icp_transform)
 
     if path_save is not None:
-        mesh.save(os.path.join(path_save, filename))
+        mesh.save_mesh(os.path.join(path_save, filename))
     return mesh
 
 def sdf_grid_to_mesh(
@@ -97,7 +146,7 @@ def sdf_grid_to_mesh(
         faces_.append(face)
     
     faces = np.hstack(faces_)
-    mesh = pv.PolyData(verts, faces)
+    mesh = mskt.mesh.Mesh(mesh=pv.PolyData(verts, faces))
 
     return mesh
 
