@@ -13,7 +13,9 @@ from GenerativeAnatomy.sdf.train.utils import (
     get_kld,
     cyclic_anneal_linear,
     calc_weight,
-    add_plain_lr_to_config
+    add_plain_lr_to_config,
+    NoOpProfiler,
+    get_profiler,
 )
 
 import wandb
@@ -26,17 +28,15 @@ loss_l1 = torch.nn.L1Loss(reduction='none')
 
 def train_deep_sdf(
     config, 
-    models: tuple,
+    model,
     sdf_dataset, 
     use_wandb=False):    
 
     config = add_plain_lr_to_config(config)
-    
     config['checkpoints'] = get_checkpoints(config)
     config['lr_schedules'] = get_learning_rate_schedules(config)
 
-    for model in models:
-        model = model.to(config['device'])
+    model = model.to(config['device'])
 
     if use_wandb is True:
         wandb.login(key=os.environ['WANDB_KEY'])
@@ -49,7 +49,7 @@ def train_deep_sdf(
             name=config['run_name'],
             tags=config['tags']
         )
-        wandb.watch(models, log='all')
+        wandb.watch(model, log='all')
 
     data_loader = torch.utils.data.DataLoader(
         sdf_dataset,
@@ -57,65 +57,81 @@ def train_deep_sdf(
         shuffle=True,
         num_workers=config['num_data_loader_threads'],
         drop_last=False,
+        prefetch_factor=config['prefetch_factor'],
+        pin_memory=True 
     )
 
-    latent_vecs = get_latent_vecs(len(data_loader.dataset), config)
+    latent_vecs = get_latent_vecs(len(data_loader.dataset), config).cuda()
 
-    optimizer = get_optimizer(models, latent_vecs, config['lr_schedules'], config["optimizer"])
+    optimizer = get_optimizer(model, latent_vecs, config['lr_schedules'], config["optimizer"])
 
-    for epoch in range(1, config['n_epochs'] + 1):
-        # not passing latent_vecs because presumably they are being tracked by the
-        # and updated in memory? 
-        log_dict = train_epoch(models, data_loader, latent_vecs, optimizer=optimizer, config=config, epoch=epoch, return_loss=True)
-        
-        if epoch in config['checkpoints']:
-            save_latent_vectors(
-                config=config,
-                epoch=epoch,
-                latent_vec=latent_vecs,
-            )
-            save_model(
-                config=config,
-                epoch=epoch,
-                decoder=models,
-            )
-            if ('val_paths' in config) & (config['val_paths'] is not None):
-                
-                torch.cuda.empty_cache()
+    # profiler that runs if config['profiler'] is True, else a dummy profiler is used and should have no effect
+    with get_profiler(config) as profiler:
 
-                dict_loss = get_mean_errors(
-                    mesh_paths=config['val_paths'],
-                    num_iterations=config['num_iterations_recon'],
-                    decoders=models,
-                    latent_size=config['latent_size'],
-                    calc_symmetric_chamfer=config['chamfer'],
-                    calc_emd=config['emd'],
-                    register_similarity=True,
-                    scale_all_meshes=True,
-                    verbose=config['verbose'],
-                    get_rand_pts=config['get_rand_pts_recon'],
-                    n_pts_random=config['n_pts_random_recon'],
-                    lr=config['lr_recon'],
-                    l2reg=config['l2reg_recon'],
-                    clamp_dist=config['clamp_dist_recon'],
-                    n_lr_updates=config['n_lr_updates_recon'],
-                    lr_update_factor=config['lr_update_factor_recon'],
-                    convergence_patience=config['convergence_patience_recon'],
-                    batch_size_latent_recon=config['batch_size_latent_recon'],
-                    convergence=config['convergence_type_recon'],
-                    sigma_rand_pts=config['sigma_rand_pts_recon'],
-                    n_samples_latent_recon=config['n_samples_latent_recon'],
+        for epoch in range(1, config['n_epochs'] + 1):
+            # not passing latent_vecs because presumably they are being tracked by the
+            # and updated in memory? 
+            log_dict = train_epoch(model, data_loader, latent_vecs, optimizer=optimizer, config=config, epoch=epoch, return_loss=True)
+            
+            if epoch in config['checkpoints']:
+                save_latent_vectors(
+                    config=config,
+                    epoch=epoch,
+                    latent_vec=latent_vecs,
                 )
+                save_model(
+                    config=config,
+                    epoch=epoch,
+                    decoder=model,
+                )
+                if ('val_paths' in config) & (config['val_paths'] is not None):
 
-                log_dict.update(dict_loss)
+                    torch.cuda.empty_cache()
+                    
+                    dict_loss = get_mean_errors(
+                        mesh_paths=config['val_paths'],
+                        decoders=model,
+                        num_iterations=config['num_iterations_recon'],
+                        register_similarity=True,
+                        latent_size=config['latent_size'],
+                        lr=config['lr_recon'],
+                        # loss_weight
+                        # loss_type
+                        l2reg=config['l2reg_recon'],
+                        # latent_init_std
+                        # latent_init_mean
+                        clamp_dist=config['clamp_dist_recon'],
+                        # latent_reg_weight
+                        n_lr_updates=config['n_lr_updates_recon'],
+                        lr_update_factor=config['lr_update_factor_recon'],
+                        calc_symmetric_chamfer=config['chamfer'],
+                        calc_emd=config['emd'],
+                        convergence=config['convergence_type_recon'],
+                        convergence_patience=config['convergence_patience_recon'],
+                        # log_wandb
+                        verbose=config['verbose'],
+                        objects_per_decoder=2,
+                        batch_size_latent_recon=config['batch_size_latent_recon'],
+                        get_rand_pts=config['get_rand_pts_recon'],
+                        n_pts_random=config['n_pts_random_recon'],
+                        sigma_rand_pts=config['sigma_rand_pts_recon'],
+                        n_samples_latent_recon=config['n_samples_latent_recon'], 
+                        # difficulty_weight_recon
+                        # chamfer_norm
+                        scale_all_meshes=True,                                           
+                    )
 
-        if use_wandb is True:                    
-            wandb.log(log_dict)
+                    log_dict.update(dict_loss)
+
+            if use_wandb is True:                    
+                wandb.log(log_dict)
+            
+            profiler.step()
         
     return
 
 def train_epoch(
-    models, 
+    model, 
     data_loader,
     latent_vecs,
     optimizer,
@@ -123,11 +139,12 @@ def train_epoch(
     epoch, 
     return_loss=True,
     verbose=False,
+    n_surfaces=2,
 ):
-    n_surfaces = len(models)
+    # n_surfaces = len(models)
     start = time.time()
-    for model in models:
-        model.train()
+    # for model in models:
+    model.train()
 
     adjust_learning_rate(config['lr_schedules'], optimizer, epoch)
     
@@ -145,11 +162,13 @@ def train_epoch(
             print('xyz data size:', sdf_data['xyz'].size())
             print('sdf gt size:', sdf_data['gt_sdf'].size())
                 
-        xyz = sdf_data['xyz']
+        xyz = sdf_data['xyz'].cuda()
         xyz = xyz.reshape(-1, 3)
 
         num_sdf_samples = xyz.shape[0]
         xyz.requires_grad = False
+
+        indices = indices.cuda()
         
         
         sdf_gt = []
@@ -190,26 +209,28 @@ def train_epoch(
 
             batch_vecs = latent_vecs(indices[split_idx])
             inputs = torch.cat([batch_vecs, xyz[split_idx]], dim=1)
-            inputs = inputs.to(config['device'])
+            # inputs = inputs.to(config['device'])
 
-            pred_sdfs = []
-            for model in models:
-                pred_sdf = model(inputs)
-                if config['enforce_minmax'] is True:
-                    pred_sdf = torch.clamp(pred_sdf, -config['clamp_dist'], config['clamp_dist'])
-                pred_sdfs.append(pred_sdf)                       
+            # pred_sdfs = []
+            # for model in models:
+            pred_sdf = model(inputs, epoch=epoch)
+            if config['enforce_minmax'] is True:
+                pred_sdf = torch.clamp(pred_sdf, -config['clamp_dist'], config['clamp_dist'])
+            # pred_sdfs.append(pred_sdf)                       
 
             if config['verbose'] is True:
-                print('len pred_sdfs', len(pred_sdfs))
+                print('len pred_sdf', pred_sdf.shape)
                 print('split idx', split_idx)
             l1_losses = []
-            for surf_idx, pred_sdf in enumerate(pred_sdfs):
+            for surf_idx in range(n_surfaces):
                 if config['verbose'] is True:
                     print('surf idx', surf_idx)
                     print(len(sdf_gt))
                     print(len(sdf_gt[surf_idx]))
-                l1_losses.append(loss_l1(pred_sdf, sdf_gt[surf_idx][split_idx].cuda()))
-            # l1_loss = loss_l1(pred_sdf, sdf_gt[split_idx].cuda())
+                    print('pred_sdf shape', pred_sdf.shape)
+                    print('unsqueezed pred_sdf shape', pred_sdf[:, surf_idx].shape)
+                    print('sdf_gt shape', sdf_gt[surf_idx][split_idx].shape)
+                l1_losses.append(loss_l1(pred_sdf[:, surf_idx], sdf_gt[surf_idx][split_idx].squeeze(1).cuda()))
 
             if 'multi_object_overlap' in config and config['multi_object_overlap'] is True:
                 raise Exception('Not implemented yet')
@@ -240,10 +261,11 @@ def train_epoch(
                     # Weights points independently
                     # so, if hard for one surface - then we weight it heavily, but if
                     # easy for another surface - then we weight it less.
-                    error_sign = torch.sign(surf_gt_[split_idx].cuda() - pred_sdfs[surf_idx])
-                    sdf_gt_sign = torch.sign(surf_gt_[split_idx].cuda())
+                    error_sign = torch.sign(surf_gt_[split_idx].squeeze(1).cuda() - pred_sdf[:, surf_idx])
+                    sdf_gt_sign = torch.sign(surf_gt_[split_idx].squeeze(1).cuda())
                     sample_weights = 1 + difficulty_weight * sdf_gt_sign * error_sign
                     l1_losses[surf_idx] = l1_losses[surf_idx] * sample_weights
+
             elif config['sample_difficulty_lx'] is not None:
                 weight_schedule = calc_weight(epoch, config['n_epochs'], config['sample_difficulty_lx_schedule'], config['sample_difficulty_lx_cooldown'])
                 for surf_idx, surf_gt_ in enumerate(sdf_gt):
@@ -274,10 +296,6 @@ def train_epoch(
             else:
                 weights = [1,] * n_surfaces
 
-            # Apple the weights to each surface loss before adding
-            # to the total l1_loss. 
-            # This does not apply the weights to the individual surfaces
-            # l1_losses, this is why they are non-zero in the saved results
             for l1_idx, l1_loss_ in enumerate(l1_losses):
                 l1_loss += l1_loss_.sum() * weights[l1_idx]
             
@@ -343,6 +361,7 @@ def train_epoch(
     save_l1_loss = step_l1_loss / len(data_loader)
     save_code_reg_loss = step_code_reg_loss / len(data_loader) 
     save_l1_losses = [l1_loss_ / len(data_loader) for l1_loss_ in step_l1_losses]   
+    
     print('save loss: ', save_loss)
     print('\t save l1 loss: ', save_l1_loss)
     print('\t save code loss: ', save_code_reg_loss)

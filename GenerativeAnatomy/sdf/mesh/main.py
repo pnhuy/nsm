@@ -12,11 +12,12 @@ import vtk
 
 from GenerativeAnatomy.sdf.datasets import norm
 
-def scale_mesh_(mesh, scale=1.0, offset=(0., 0., 0.), icp_transform=None):
+def scale_mesh_(mesh, scale=1.0, offset=(0., 0., 0.), icp_transform=None, verbose=False):
     if not issubclass(type(mesh), mskt.mesh.Mesh):
         mesh = mskt.mesh.Mesh(mesh)
     
-    print('scale', scale)
+    if verbose is True:
+        print('scale_mesh_. scale:', scale)
 
     pts = mesh.point_coords * scale
     pts += offset
@@ -27,10 +28,10 @@ def scale_mesh_(mesh, scale=1.0, offset=(0., 0., 0.), icp_transform=None):
         transform = vtk.vtkTransform()
         transform.SetMatrix(icp_transform.GetMatrix())
         transform.Inverse()
-        print(icp_transform)
-        # # icp_transform.Inverse()
-        print('INVERSE')
-        print(transform)
+        if verbose is True:
+            print(icp_transform)
+            print('INVERSE')
+            print(transform)
         mesh.apply_transform_to_mesh(transform)
     
     return mesh
@@ -41,7 +42,8 @@ def scale_mesh(
     scale=1.0,
     offset=(0., 0., 0.),
     scale_method='max_rad',
-    icp_transform=None
+    icp_transform=None,
+    verbose=False
     ):
 
     if old_mesh is not None:
@@ -53,14 +55,14 @@ def scale_mesh(
         new_pts = new_mesh.point_coords
 
         offset = np.mean(old_pts, axis=0)
-        old_pts -= mean_old
+        old_pts -= offset
 
         if scale_method == 'max_rad':
             scale = np.max(norm(old_pts), axis=-1)    
         else:
             raise NotImplementedError
     
-    mesh = scale_mesh_(new_mesh, scale=scale, offset=offset, icp_transform=icp_transform)
+    mesh = scale_mesh_(new_mesh, scale=scale, offset=offset, icp_transform=icp_transform, verbose=verbose)
     return mesh
 
 def apply_similarity_transform(mesh, R, t, s):
@@ -80,13 +82,15 @@ def create_mesh(
     scale=1.0,
     offset=(0., 0., 0.),
     path_save=None,
-    filename='mesh.vtk',
+    filename='mesh_{mesh_idx}.vtk',
     path_original_mesh=None,
     scale_to_original_mesh=True,
     R=None,
     t=None,
     s=None,
-    icp_transform=None
+    icp_transform=None,
+    objects=1,
+    verbose=False
 ):
 
     if voxel_size is None:
@@ -95,25 +99,108 @@ def create_mesh(
     decoder.eval()
 
     samples = create_grid_samples(n_pts_per_axis, voxel_origin, voxel_size)
-    sdf_values = get_sdfs(decoder, samples, latent_vector, batch_size)
+    sdf_values_ = get_sdfs(decoder, samples, latent_vector, batch_size, objects=objects)
+
+    # resample SDFs into a grid:
+    sdf_values = torch.zeros((n_pts_per_axis, n_pts_per_axis, n_pts_per_axis, objects))
+    for i in range(objects):
+        sdf_values[..., i] = sdf_values_[..., i].reshape(n_pts_per_axis, n_pts_per_axis, n_pts_per_axis)
+    # sdf_values = sdf_values.reshape(n_pts_per_axis, n_pts_per_axis, n_pts_per_axis)
+
+    # create mesh from gridded SDFs
+    meshes = []
+    for mesh_idx in range(objects):
+        # iterate over all the meshes
+        sdf_values_ = sdf_values[..., mesh_idx]
+
+        # check if there is a surface
+        if 0 < sdf_values_.min() or 0 > sdf_values_.max():
+            if verbose is True:
+                print('WARNING: SDF values do not span 0 - there is no surface')
+                print('\tSDF min: ', sdf_values_.min())
+                print('\tSDF max: ', sdf_values_.max())
+                print('\tSDF mean: ', sdf_values_.mean())
+            meshes.append(None)
+        else:
+            # if there is a surface, then extract it & post-process
+            # for mesh_idx in range(objects):
+            mesh = sdf_grid_to_mesh(sdf_values_, voxel_origin, voxel_size)
+            meshes.append(mesh)
+
+            # apply scaling/transformation to mesh
+            if (R is True) & (s is True) & (t is True):
+                # for mesh in meshes:
+                apply_similarity_transform(meshes[mesh_idx], R, t, s)
+
+            elif scale_to_original_mesh:
+                if verbose is True:
+                    print('Scaling mesh to original mesh... ')
+                    print(icp_transform)
+                # for mesh_idx, mesh in enumerate(meshes):
+                mesh = scale_mesh(meshes[mesh_idx], old_mesh=path_original_mesh, scale=scale, offset=offset, icp_transform=icp_transform, verbose=verbose)
+                meshes[mesh_idx] = mesh
+
+            # save the mesh (if desired)
+            if path_save is not None:
+            # for mesh_idx, mesh in enumerate(meshes):
+                meshes[mesh_idx].save_mesh(os.path.join(path_save, filename.format(mesh_idx=mesh_idx)))
+    return meshes[0] if objects == 1 else meshes
+
+def create_mesh_diffusion_sdf(
+    model,
+    latent_vector,
+    n_pts_per_axis=256,
+    voxel_origin=(-1, -1, -1),
+    voxel_size=None,
+    batch_size=32**3,
+    scale=1.0,
+    offset=(0., 0., 0.),
+    path_save=None,
+    filename='mesh.vtk',
+    path_original_mesh=None,
+    scale_to_original_mesh=True,
+    R=None,
+    t=None,
+    s=None,
+    icp_transform=None,
+    verbose=False
+):
+
+    if voxel_size is None:
+        voxel_size = 2.0 / (n_pts_per_axis - 1)
+
+    model.eval()
+
+    samples = create_grid_samples(n_pts_per_axis, voxel_origin, voxel_size)
+    sdf_values = get_sdfs(model, samples, latent_vector, batch_size)
 
     # resample SDFs into a grid: 
     sdf_values = sdf_values.reshape(n_pts_per_axis, n_pts_per_axis, n_pts_per_axis)
 
     # create mesh from gridded SDFs
-    mesh = sdf_grid_to_mesh(sdf_values, voxel_origin, voxel_size)
+    if 0 < sdf_values.min() or 0 > sdf_values.max():
+        if verbose is True:
+            print('WARNING: SDF values do not span 0 - there is no surface')
+            print('\tSDF min: ', sdf_values.min())
+            print('\tSDF max: ', sdf_values.max())
+            print('\tSDF mean: ', sdf_values.mean())
+        return None
+    else:
+        mesh = sdf_grid_to_mesh(sdf_values, voxel_origin, voxel_size)
 
     if (R is True) & (s is True) & (t is True):
         apply_similarity_transform(mesh, R, t, s)
 
     elif scale_to_original_mesh:
-        print('Scaling mesh to original mesh... ')
-        print(icp_transform)
-        mesh = scale_mesh(mesh, old_mesh=path_original_mesh, scale=scale, offset=offset, icp_transform=icp_transform)
+        if verbose is True:
+            print('Scaling mesh to original mesh... ')
+            print(icp_transform)
+        mesh = scale_mesh(mesh, old_mesh=path_original_mesh, scale=scale, offset=offset, icp_transform=icp_transform, verbose=verbose)
 
     if path_save is not None:
         mesh.save_mesh(os.path.join(path_save, filename))
     return mesh
+
 
 def sdf_grid_to_mesh(
     sdf_values,
@@ -150,7 +237,6 @@ def sdf_grid_to_mesh(
 
     return mesh
 
-
 def create_grid_samples(
     n_pts_per_axis=256,
     voxel_origin=(-1, -1, -1),
@@ -173,25 +259,23 @@ def create_grid_samples(
 
     return samples
 
-def get_sdfs(decoder, samples, latent_vector, batch_size=32**3):
+def get_sdfs(decoder, samples, latent_vector, batch_size=32**3, objects=1):
 
     n_pts_total = samples.shape[0]
 
     current_idx = 0
-    sdf_values = torch.zeros(samples.shape[0])
+    sdf_values = torch.zeros(samples.shape[0], objects)
 
     while current_idx < n_pts_total:
         current_batch_size = min(batch_size, n_pts_total - current_idx)
         sampled_pts = samples[current_idx : current_idx + current_batch_size, :3].cuda()
-        sdf_values[current_idx : current_idx + current_batch_size] = decode_sdf(
+        sdf_values[current_idx : current_idx + current_batch_size, :] = decode_sdf(
             decoder, latent_vector, sampled_pts
         ).squeeze(1).detach().cpu()
 
         current_idx += current_batch_size
-    
+    # sdf_values.squeeze(1)
     return sdf_values
-    
-
 
 def decode_sdf(decoder, latent_vector, queries):
     num_samples = queries.shape[0]
@@ -203,4 +287,5 @@ def decode_sdf(decoder, latent_vector, queries):
         inputs = torch.cat([latent_repeat, queries], dim=1)
     
     return decoder(inputs)
+
 

@@ -9,6 +9,14 @@ from GenerativeAnatomy.sdf.sdf_utils import (
 )
 from GenerativeAnatomy.sdf.reconstruct import get_mean_errors
 
+from GenerativeAnatomy.sdf.train.utils import (
+    get_kld,
+    cyclic_anneal_linear,
+    calc_weight,
+    add_plain_lr_to_config
+)
+
+
 import wandb
 import os
 import torch 
@@ -23,6 +31,7 @@ def train_deep_sdf(
     sdf_dataset, 
     use_wandb=False):    
 
+    config = add_plain_lr_to_config(config)
     config['checkpoints'] = get_checkpoints(config)
     config['lr_schedules'] = get_learning_rate_schedules(config)
 
@@ -72,13 +81,30 @@ def train_deep_sdf(
                 epoch=epoch,
                 decoder=model,
             )
-            if ('val_paths' in config) & (config['val_paths'] is not None):
+            if ('val_paths' in config) and (config['val_paths'] is not None):
+                
+                torch.cuda.empty_cache()
+
                 dict_loss = get_mean_errors(
                     mesh_paths=config['val_paths'],
+                    num_iterations=config['num_iterations_recon'],
                     decoder=model,
                     latent_size=config['latent_size'],
                     calc_symmetric_chamfer=config['chamfer'],
                     calc_emd=config['emd'],
+                    verbose=config['verbose'],
+                    get_rand_pts=config['get_rand_pts_recon'],
+                    n_pts_random=config['n_pts_random_recon'],
+                    lr=config['lr_recon'],
+                    l2reg=config['l2reg_recon'],
+                    clamp_dist=config['clamp_dist_recon'],
+                    n_lr_updates=config['n_lr_updates_recon'],
+                    lr_update_factor=config['lr_update_factor_recon'],
+                    convergence_patience=config['convergence_patience_recon'],
+                    batch_size_latent_recon=config['batch_size_latent_recon'],
+                    convergence=config['convergence_type_recon'],
+                    sigma_rand_pts=config['sigma_rand_pts_recon'],
+                    n_samples_latent_recon=config['n_samples_latent_recon'], 
                 )
 
                 log_dict.update(dict_loss)
@@ -87,25 +113,6 @@ def train_deep_sdf(
             wandb.log(log_dict)
         
     return loss
-
-def calc_weight(epoch, n_epochs, schedule, cooldown=None):
-    
-    if cooldown is not None:
-        if epoch > (n_epochs - cooldown):
-            return 1.0
-        else:
-            n_epochs = n_epochs - cooldown
-    if schedule == 'linear':
-        return epoch / n_epochs
-    elif schedule == 'exponential':
-        return epoch**2 / n_epochs**2
-    elif schedule == 'exponential_plateau':
-        return 1 - (epoch-n_epochs)**2/n_epochs**2
-    elif schedule == 'constant':
-        return 1.0
-    else:
-        raise ValueError('Unknown schedule: {}'.format(schedule))
-
 
 def train_epoch(
     model, 
@@ -130,17 +137,21 @@ def train_epoch(
         #     kld_loss = get_kld(latent_vecs)
 
     for sdf_data, indices in data_loader:
-        if verbose is True:
+        if config['verbose'] is True:
             print('sdf index size:', indices.size())
-            print('sdf data size:', sdf_data.size())
+            print('xyz data size:', sdf_data['xyz'].size())
+            print('sdf gt size:', sdf_data['gt_sdf'].size())
         
-        sdf_data = sdf_data.reshape(-1, 4)
+        # sdf_data = sdf_data.reshape(-1, 4)
 
-        num_sdf_samples = sdf_data.shape[0]
-        sdf_data.requires_grad = False
+        xyz = sdf_data['xyz']
+        xyz = xyz.reshape(-1, 3)
+        sdf_gt = sdf_data['gt_sdf']
+        sdf_gt = sdf_gt.reshape(-1, 1)
 
-        xyz = sdf_data[:, :3]
-        sdf_gt = sdf_data[:, 3].unsqueeze(1)
+        num_sdf_samples = xyz.shape[0]
+        xyz.requires_grad = False
+        sdf_gt.requires_grad = False
 
         if config['enforce_minmax'] is True:
             sdf_gt = torch.clamp(sdf_gt, -config['clamp_dist'], config['clamp_dist'])
@@ -159,7 +170,7 @@ def train_epoch(
         optimizer.zero_grad()
 
         for split_idx in range(config['batch_split']):
-            if verbose is True:
+            if config['verbose'] is True:
                 print('Split idx: ', split_idx)
 
             batch_vecs = latent_vecs(indices[split_idx])
@@ -265,35 +276,3 @@ def train_epoch(
     }
 
     return log_dict
-
-def cyclic_anneal_linear(
-    epoch,
-    n_epochs,
-    min_=0,
-    max_=1,
-    ratio=0.5,
-    n_cycles=5
-):
-    """
-    https://github.com/haofuml/cyclical_annealing
-    """
-    cycle_length = np.floor(n_epochs / n_cycles).astype(int)
-    cycle = epoch // cycle_length
-    cycle_progress = epoch % cycle_length
-
-    weight = (cycle_progress / cycle_length) * (1/ratio)
-    weight = np.min([weight, 1])
-
-    return min_ + (max_ - min_) * weight
-
-def get_kld(array, samples_dim=0):
-    """
-    kld_loss = -0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1)
-    https://en.wikipedia.org/wiki/Kullback%E2%80%93Leibler_divergence#Multivariate_normal_distributions
-    Above is the KLD between a diagonal multivariate normal distribution and a standard normal distribution.
-    """
-    mean = torch.mean(array, dim=samples_dim)
-    var = torch.var(array, dim=samples_dim)
-    kld = -0.5 * torch.sum(1 + torch.log(var) - mean ** 2 - var)
-
-    return kld

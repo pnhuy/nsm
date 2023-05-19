@@ -3,6 +3,23 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
+PROGRESSIVE_PARAMS = {
+    'n_layers': 3,
+    'layers': {
+        5: { # Or -3, -2, -1.... 
+            'start_epoch': 200,
+            'warmup_epochs': 200,
+        },
+        6:{ # Or -3, -2, -1.... 
+            'start_epoch': 600,
+            'warmup_epochs': 200,
+        },
+        7:{ # Or -3, -2, -1.... 
+            'start_epoch': 1010,
+            'warmup_epochs': 200,
+        },
+    }
+}
 
 class Sine(nn.Module):
     def __init(self):
@@ -27,6 +44,9 @@ class Decoder(nn.Module):
         latent_dropout=False,
         activation="relu",  # "relu" or "sin"
         final_activation="tanh", #"sin", "linear"
+        concat_latent_input=False,
+        progressive_add_depth=False,
+        progressive_depth_params=PROGRESSIVE_PARAMS
     ):
         """
         latent_size (int): size of the latent input vector to the decoder network
@@ -68,17 +88,33 @@ class Decoder(nn.Module):
         self.xyz_in_all = xyz_in_all
         self.weight_norm = weight_norm
 
+        self.progressive_add_depth = progressive_add_depth
+        self.progressive_depth_params = progressive_depth_params
+
         # self.activation = activation
 
         for layer in range(0, self.num_layers - 1):
-            if layer + 1 in latent_in:
-                out_dim = dims[layer + 1] - dims[0]
-            else:
+            if concat_latent_input == False:
+                in_dim = dims[layer]
+                if (layer + 1 in latent_in):
+                    out_dim = dims[layer + 1] - dims[0]
+                else:
+                    out_dim = dims[layer + 1]
+            elif concat_latent_input == True:
                 out_dim = dims[layer + 1]
-                if self.xyz_in_all and layer != self.num_layers - 2:
-                    out_dim -= 3
+                if layer in latent_in:
+                    in_dim = dims[layer] + dims[0]
+                else:
+                    in_dim = dims[layer]
+            else:
+                in_dim = dims[layer]
+                out_dim = dims[layer + 1]
+            if self.xyz_in_all and layer != self.num_layers - 2:
+                #TODO: Should this also include logic for
+                # concat_latent_input? - right now it assumes not concat
+                out_dim -= 3
 
-            lin = nn.Linear(dims[layer], out_dim)
+            lin = nn.Linear(in_dim, out_dim)
 
             # be sure to specially initialize layer weights 
             # for the sine activation based network (Siren). 
@@ -125,9 +161,10 @@ class Decoder(nn.Module):
 
         self.dropout_prob = dropout_prob
         self.dropout = dropout
+        self.epoch = None
 
     # input: N x (L+3)
-    def forward(self, input):
+    def forward(self, input, epoch=None):
         xyz = input[:, -3:]
 
         if input.shape[1] > 3 and self.latent_dropout:
@@ -140,10 +177,45 @@ class Decoder(nn.Module):
         for layer in range(0, self.num_layers - 1):
             lin = getattr(self, "lin" + str(layer))
             if layer in self.latent_in:
-                x = torch.cat([x, input], 1)
+                xi = torch.cat([x, input], 1)
             elif layer != 0 and self.xyz_in_all:
-                x = torch.cat([x, xyz], 1)
-            x = lin(x)
+                xi = torch.cat([x, xyz], 1)
+            else:
+                xi = x
+            
+            if (self.progressive_add_depth is True) and (layer in self.progressive_depth_params['layers']):
+                # use this as a way to store the progress of the network so far.
+                # this way if we try to use the partly tuned model for inference, it will be able to 
+                # use the weights that have been tuned so far.
+                if epoch is not None:
+                    self.epoch = epoch
+                # progresive tuning of latter layers is from Curriculum DeepSDF
+                # code was adapted from:
+                #https://github.com/haidongz-usc/Curriculum-DeepSDF
+                start = self.progressive_depth_params['layers'][layer]['start_epoch']
+                warmup = self.progressive_depth_params['layers'][layer]['warmup_epochs']
+                end = start + warmup
+                if self.epoch < start:
+                    # before start... dont apply this block at all.
+                    # we are doing continue (vs break) because the 
+                    # final layer should still be applied. 
+                    continue
+                elif start < self.epoch < end:
+                    # during warmup... linearly phase this block in
+                    # https://github.com/haidongz-usc/Curriculum-DeepSDF/blob/ca216dda8edc6435139a6f657c45800791be94a7/networks/deep_sdf_decoder_train.py#L113
+                    new_weight = ((self.epoch - start)/warmup)
+                    new_weight = new_weight**2
+                    base_weight = 1 - new_weight
+                    # base_weight = ((end-self.epoch)/warmup)
+
+                    x_base = xi * base_weight
+                    x_new = lin(xi) * new_weight
+                    x = x_base + x_new
+                else:
+                    # after start + warmup epochs just apply this block as a normal layer
+                    x = lin(xi)
+            else:
+                x = lin(xi)
             
             # only apply normalization/ regular activation to 
             # hidden layers (not output)

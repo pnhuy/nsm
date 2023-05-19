@@ -74,7 +74,10 @@ def get_learning_rate_schedules(config):
 
     return schedules
 
-def adjust_learning_rate(lr_schedules, optimizer, epoch):
+def adjust_learning_rate(lr_schedules, optimizer, epoch, verbose=False):
+    if verbose is True:
+        print("optimizer param groups: ", optimizer.param_groups)
+        print('lr_schedules: ', lr_schedules)
     for i, param_group in enumerate(optimizer.param_groups):
         param_group["lr"] = lr_schedules[i].get_learning_rate(epoch)
 
@@ -113,7 +116,7 @@ def save_model(config, epoch, decoder, model_subdir="model"):
             os.makedirs(folder_save, exist_ok=True)
         
         torch.save(
-            {"epoch": epoch, "model": decoder.state_dict()},
+            {"epoch": epoch, "model": decoder_.state_dict()},
             os.path.join(folder_save, filename),
         )
 
@@ -152,7 +155,7 @@ def get_optimizer(model, latent_vecs, lr_schedules, optimizer="Adam",):
             "lr": lr_schedules[1].get_learning_rate(0),
         }
     ]
-    for model_ in models:
+    for model_ in model:
         list_params.append(
             {
                 "params": model_.parameters(),
@@ -166,3 +169,9 @@ def get_optimizer(model, latent_vecs, lr_schedules, optimizer="Adam",):
         optimizer = torch.optim.AdamW(list_params, weight_decay=0.0001)
 
     return optimizer
+
+
+def symmetric_chammfer(p1, p2, n_pts):
+    """
+    """
+    pass

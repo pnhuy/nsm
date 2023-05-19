@@ -1,12 +1,26 @@
 import torch
-from GenerativeAnatomy.sdf.datasets import read_mesh_get_sampled_pts, get_pts_center_and_scale
+
+from .reconstruct_diffusion_sdf import reconstruct_mesh_diffusion_sdf
+from .utils import (
+    compute_chamfer,
+    adjust_learning_rate
+)
+from .reconstruct_latent_S3 import reconstruct_latent_S3
+
+from GenerativeAnatomy.sdf.datasets import (
+    read_mesh_get_sampled_pts, 
+    get_pts_center_and_scale,
+    read_meshes_get_sampled_pts
+)
 from GenerativeAnatomy.sdf.mesh import create_mesh
+
 # from GenerativeAnatomy.sdf.testing import get_mean_errors
 import numpy as np
 import sys
 import os
 import pymskt as mskt
 import wandb
+import time
 
 try:
     from pytorch3d.loss import chamfer_distance
@@ -22,355 +36,20 @@ except:
     print('Error importing `sinkhorn` from GenerativeAnatomy.dependencies')
     __emd__ = False
 
-# Update LR
-def adjust_learning_rate(
-    initial_lr, optimizer, iteration, decreased_by, adjust_lr_every
-):
-    lr = initial_lr * ((1 / decreased_by) ** (iteration // adjust_lr_every))
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = lr
-
-# TODO: Add scaling, translation, and rotation to optimization
-# DeepSDF x Sim(3)
-# Extending DeepSDF for automatic 3D shape retrieval and similarity transform estimation
-# https://arxiv.org/abs/2004.09048
-# 
-
-def get_w(w1, w2, w3):
-    return torch.Tensor([
-        [0, -w3, w2],
-        [w3, 0, -w1],
-        [-w2, w1, 0]
-    ])
-
-def get_axis_angle_rotation_matrix(polar_angle, azimuthal_angle, theta, epsilon=1e-6):
-    """
-    
-    """
-    if type(polar_angle) is not torch.Tensor:
-        if type(polar_angle) is np.ndarray:
-            polar_angle = torch.from_numpy(polar_angle)
-        else:
-            polar_angle = torch.Tensor([polar_angle])
-    if type(azimuthal_angle) is not torch.Tensor:
-        if type(azimuthal_angle) is np.ndarray:
-            azimuthal_angle = torch.from_numpy(azimuthal_angle)
-        else:
-            azimuthal_angle = torch.Tensor([azimuthal_angle])
-    if type(theta) is not torch.Tensor:
-        if type(theta) is np.ndarray:
-            theta = torch.from_numpy(theta)
-        else:
-            theta = torch.Tensor([theta])
-
-    # use spherical coordinates to define the rotation axis
-    w1 = torch.sin(polar_angle) * torch.cos(azimuthal_angle)
-    w2 = torch.sin(polar_angle) * torch.sin(azimuthal_angle)
-    w3 = torch.cos(polar_angle)
-
-    # Normalize - becuase the spherical conversion is not perfect
-    norm = torch.sqrt(w1**2 + w2**2 + w3**2)
-    w1 = w1 / norm
-    w2 = w2 / norm
-    w3 = w3 / norm
-
-    w = get_w(w1, w2, w3)
-    I = torch.eye(3)
-    # See section 5.1 of paper: 
-    # https://arxiv.org/pdf/2004.09048.pdf
-    R = I + w * torch.sin(theta) + w @ w * (1 - torch.cos(theta))
-    return R
 
 
-def reconstruct_latent_S3(
-    decoder, 
-    num_iterations,
-    latent_size,
-    new_sdf, #Nx4
-    loss_type='l1',
-    lr=5e-4,
-    loss_weight=1.0,
-    l2reg=False,
-    latent_init_std=0.01,
-    latent_init_mean=0.0,
-    clamp_dist=None,
-    latent_reg_weight=1e-4,
-    n_lr_updates=2,
-    lr_update_factor=10,
-    convergence='num_iterations',
-    convergence_patience=50,
-    log_wandb=False,
-    soft_contrain_scale=True,
-    scale_constrain_deviation=0.05,
-    # scale_constrain_max=200,
-    soft_constrain_theta=True,
-    theta_constrain_deviation=torch.pi/36,
-    soft_constrain_translation=True,
-    translation_constrain_deviation=0.05,
-    init_scale_method='max_rad',
-    transform_update_patience=500
-):
-    """
-    DeepSDF x Sim(3)
-    Extending DeepSDF for automatic 3D shape retrieval and similarity transform estimation
-    https://arxiv.org/abs/2004.09048
-    """
 
-    if convergence != 'num_iterations':
-        num_iterations = max(num_iterations, 10000)
-    
-    adjust_lr_every = num_iterations // n_lr_updates
-
-    # Parse the inputted SDF
-    if type(new_sdf) is str:
-        # if string, assume path to mesh
-        #TODO: Do we want to add option to sample points in/out of mesh?
-        #      Will this speed up convergence?
-        result_ = read_mesh_get_sampled_pts(
-            new_sdf, 
-            get_random=False, 
-            center_pts=False, 
-            norm_pts=False, 
-            scale_method=None,
-            return_orig_mesh=False,
-            return_new_mesh=False,
-            return_orig_pts=False
-        )
-        xyz = result_['pts'] 
-        sdf_gt = result_['sdf']
-        xyz = torch.from_numpy(xyz).float()
-        sdf_gt = torch.from_numpy(sdf_gt).float().unsqueeze(1)
-    elif isinstance(new_sdf, (torch.Tensor, np.ndarray)):
-        if new_sdf.shape[1] == 3:
-            # if 
-            xyz = new_sdf
-            sdf_gt = torch.zeros(xyz.shape[0], 1)
-        elif new_sdf.shape[1] == 4:
-            xyz = new_sdf[:, :3]
-            sdf_gt = new_sdf[:, 3].unsqueeze(1)
-        else:
-            raise ValueError(f'Inputted SDF must have shape Nx3 or Nx4 got: {new_s}')
-    
-    # Sensibly initilize the registration parameters
-    init_center, init_scale = get_pts_center_and_scale(
-            np.copy(xyz),
-            center=True,
-            scale=True,
-            scale_method=init_scale_method,
-            return_pts=False
-    )
-    init_center = torch.from_numpy(init_center).float()
-
-    print(f'init_center: {init_center}')
-    print(f'init_scale: {init_scale}')
-
-    # constrain the scale to be within a fraction of the initial scale
-    scale_constrain = init_scale * scale_constrain_deviation
-    # scale_constrain_min = init_scale - (init_scale * scale_constrain_deviation)
-    # scale_constrain_max = init_scale + (init_scale * scale_constrain_deviation)
-
-    # constaint for translation is a fraction of the diameter of the object
-    # the init_scale = radius, so the diameter is 2 * init_scale
-    translation_constrain = 2 * init_scale * translation_constrain_deviation
-
-    # constrain theta to be within a certain range that should be relatively small
-    # we should still have all knees pointing in the same direction in space based on MRI alignment
-    # therefore, they should only need to change a small amount to be aligned but the axis they should
-    # rotate around could be anything. Therefore, we will leave the axis of rotation completely 
-    # learnable but the rotation angle should be relatively small (10 degrees?)
-    # in the real world application of this, we could apply a registration of images before creating meshes
-    # as a starting point - or rigidly register any created point could to the mean mesh as a starting point
-    # theta_constrain_max = theta_constrain_deviation
-    # theta_constrain_min = -theta_constrain_deviation
-
-    
-    n_samples = xyz.shape[0]
-    
-    if clamp_dist is not None:
-        sdf_gt = torch.clamp(sdf_gt, -clamp_dist, clamp_dist)
-    sdf_gt = sdf_gt.cuda()
-    # Figure out information about LR updates
-
-    # Initialize latent vector
-    latent = torch.ones(1, latent_size).normal_(mean=latent_init_mean, std=latent_init_std)
-    
-    # Initialize similarity transform parameters
-    polar_angle = torch.ones(1).normal_(mean=0.0, std=0.01)
-    azimuthal_angle = torch.ones(1).normal_(mean=0.0, std=0.01)
-    theta = torch.ones(1).normal_(mean=0.0, std=0.01)
-    scale = torch.ones(1).normal_(mean=100, std=0.01)
-    translation = torch.ones(3).normal_(mean=0.0, std=0.01)
-
-    list_to_optimize = [
-        latent, polar_angle, azimuthal_angle, theta, scale, translation
-    ]
-
-    for item in list_to_optimize:
-        item.requires_grad = True
-
-    # Initialize optimizer
-    optimizer = torch.optim.Adam(list_to_optimize, lr=lr)
-
-    # Initialize loss
-    loss = 0
-    if loss_type == 'l1':
-        loss_fn = torch.nn.L1Loss()
-    elif loss_type == 'l2':
-        loss_fn = torch.nn.MSELoss()
-
-    # Initialize convergence tracking
-    patience = 0
-    loss = 10 
-
-    for step in range(num_iterations):
-        decoder.cuda()
-        decoder.eval()
-
-        #update LR
-        adjust_learning_rate(
-            initial_lr=lr,
-            optimizer=optimizer,
-            iteration=step, 
-            decreased_by=lr_update_factor, 
-            adjust_lr_every=adjust_lr_every
-        )
-
-        optimizer.zero_grad()
-
-        # use inverse transform information to 
-        # transform xyz to the canonical space
-        
-        # EQUATION 15: https://arxiv.org/pdf/2004.09048.pdf
-        translated = xyz - translation
-        # torch.linalg.inv
-        # torch.linalg.inv documentation:
-        # It is always prefered to use solve() when possible, 
-        # as it is faster and more numerically stable than 
-        # computing the inverse explicitly.
-        # ITS NOT CLEAR IF THIS WILL WORK BECUASE ITS NOT A SQUARE SYSTEM
-        # OF EQUATIONS: e.g., https://www.mathwords.com/s/square_system_of_equations.htm#:~:text=Mathwords%3A%20Square%20System%20of%20Equations&text=A%20linear%20system%20of%20equations,system%20is%20a%20square%20matrix.
-        
-        R = get_axis_angle_rotation_matrix(polar_angle, azimuthal_angle, theta)
-        Rinv = torch.linalg.inv(R)
-        rotated = (Rinv @ translated.T).T
-        scaled = rotated / scale
-
-        print('scale', scale)
-        print('R', R)
-        print('translation', translation)
-        print('theta_contrain_deviation', theta_constrain_deviation)
-        print('scale_constrain', scale_constrain)
-        print('translation_constrain', translation_constrain)
-        
-        
-        latent_input = latent.expand(n_samples, -1)
-        inputs = torch.cat([latent_input, scaled], dim=1).cuda()
-
-        pred_sdf = decoder(inputs)
-
-        if clamp_dist is not None:
-            pred_sdf = torch.clamp(pred_sdf, -clamp_dist, clamp_dist)
-        
-        _loss_ = loss_fn(pred_sdf, sdf_gt) * loss_weight
-
-        if l2reg is True:
-            latent_loss_ = latent_reg_weight * torch.mean(latent ** 2)
-            loss_ = _loss_ + latent_loss_
-        else:
-            loss_ = _loss_
-        
-        if (transform_update_patience is not None) & (step > transform_update_patience):
-            # Applying soft constraints to the scale
-            # and theta parameters to keep them in a reasonable range
-            # can probably tighten up the scale parameter
-            if soft_contrain_scale is True:
-                scale_diff = torch.abs(scale - init_scale)
-                print('scale diff:', scale_diff)
-                print('scale constrain:', scale_constrain)
-                if scale_diff > scale_constrain:
-                    update = 1000 * (scale_diff - scale_constrain)**2
-                # if (scale - scale_constrain) > init_scale:
-                #     loss_ += (scale - scale_constrain + init_scale) * 1000
-                # elif (scale + scale_constrain) < init_scale:
-                #     loss_ += (scale - init_scale - scale_constrain) * 1000
-                else:
-                    # normalize this to the initalization scale
-                    update = (scale_diff/init_scale) * 1e-6
-                print('scale update:', update)
-                loss_ += torch.squeeze(update)
-                
-            if soft_constrain_theta is True:
-                # if (theta > theta_constrain_max):
-                #     loss_ += (theta - theta_constrain_max) * 1000
-                # elif (theta < theta_constrain_min):
-                #     loss_ += (theta_constrain_min - theta) * 1000
-                print('theta:', theta)
-                if (torch.abs(theta) > theta_constrain_deviation):
-                    update = 1000 * (theta - theta_constrain_deviation)**2
-                else:
-                    update = torch.abs(theta) * 1e-8
-                print('theta update:', update)
-                loss_ += torch.squeeze(update)
-
-            if soft_constrain_translation is True:
-                print('translation:', translation)
-                if (torch.linalg.norm(translation - init_center) > translation_constrain):
-                    update = 1000 * (torch.linalg.norm(translation - init_center) - translation_constrain)**2
-                else:
-                    # normalize this to the initalization scale
-                    update = (torch.linalg.norm(translation - init_center)/init_scale) * 1e-6
-                print('translation update:', update)
-                loss_ += torch.squeeze(update)
-
-        loss_.backward()
-        optimizer.step()
-
-        if step % 50 == 0:
-            print('Step: ', step, 'Loss: ', loss_.item())
-            print('\tLatent norm: ', latent.norm)
-        
-        if log_wandb is True:
-            wandb.log({
-                'l1_loss': loss_.item(),
-                'recon_loss': _loss_.item(),
-                'latent_loss': latent_loss_.item(),
-                'latent_norm': latent.norm().item()
-            })
-
-        if convergence == 'overall_loss':
-            if loss_ < loss:
-                loss = loss_
-                latent_ = torch.clone(latent)
-                patience = 0
-            else:
-                patience += 1
-            
-            if patience > convergence_patience:
-                print('Converged!')
-                break
-        elif convergence == 'recon_loss':
-            raise Exception('Not implemented yet')
-        else:
-            loss = loss_
-            latent_ = torch.clone(latent)
-    
-    latent_return = {
-        'latent': latent_,
-        'R': R,
-        's': scale,
-        't': translation,
-    }
-            
-    return loss, latent_return
 
 def reconstruct_latent(
-    decoder,
+    decoders,
     num_iterations,
     latent_size,
-    new_sdf, #Nx4
+    xyz, #Nx3
+    sdf_gt, #Nx1 or list of Nx1
     loss_type='l1',
     lr=5e-4,
     loss_weight=1.0,
+    max_batch_size=30000,
     l2reg=False,
     latent_init_std=0.01,
     latent_init_mean=0.0,
@@ -381,59 +60,65 @@ def reconstruct_latent(
     convergence='num_iterations',
     convergence_patience=50,
     log_wandb=False,
+    log_wandb_step=10,
+    verbose=False,
+    optimizer_name='adam',
+    n_samples=None,
+    difficulty_weight=None,
+    pts_surface=None,
 ):
-
-    if convergence != 'num_iterations':
-        num_iterations = max(num_iterations, 10000)
-    
-    adjust_lr_every = num_iterations // n_lr_updates
-
-    # Parse the inputted SDF
-    if type(new_sdf) is str:
-        # if string, assume path to mesh
-        #TODO: Do we want to add option to sample points in/out of mesh?
-        #      Will this speed up convergence?
-        result_ = read_mesh_get_sampled_pts(
-            new_sdf, 
-            get_random=False, 
-            center_pts=True, 
-            norm_pts=True, 
-            scale_method='max_rad',
-            return_orig_mesh=False,
-            return_new_mesh=False,
-            return_orig_pts=False
+    if type(sdf_gt) in (torch.Tensor, np.ndarray):
+        sdf_gt = [sdf_gt]
+    elif type(sdf_gt) in (list, tuple):
+        pass
+    elif type(sdf_gt) in (str):
+        raise Exception(
+            'Must provided xyz/sdf from mesh - resconstruct latent will not load mesh' +
+            'from file. Try reconstruct_mesh instead.'
         )
-        xyz = result_['pts'] 
-        sdf_gt = result_['sdf']
-        xyz = torch.from_numpy(xyz).float()
-        sdf_gt = torch.from_numpy(sdf_gt).float().unsqueeze(1)
-    elif isinstance(new_sdf, (torch.Tensor, np.ndarray)):
-        if new_sdf.shape[1] == 3:
-            # if 
-            xyz = new_sdf
-            sdf_gt = torch.zeros(xyz.shape[0], 1)
-        elif new_sdf.shape[1] == 4:
-            xyz = new_sdf[:, :3]
-            sdf_gt = new_sdf[:, 3].unsqueeze(1)
-        else:
-            raise ValueError(f'Inputted SDF must have shape Nx3 or Nx4 got: {new_s}')
-
-    n_samples = xyz.shape[0]
+    else:
+        raise Exception('Invalid sdf_gt type')
     
-    if clamp_dist is not None:
-        sdf_gt = torch.clamp(sdf_gt, -clamp_dist, clamp_dist)
-    sdf_gt = sdf_gt.cuda()
+    print(pts_surface.shape)
+
+    if isinstance(pts_surface, (list, tuple)):
+        pts_surface = torch.tensor(pts_surface).cuda()
+    elif isinstance(pts_surface, np.ndarray):
+        pts_surface = torch.from_numpy(pts_surface).cuda()
+
+    if not isinstance(decoders, (list, tuple)):
+        decoders = [decoders,]
+
+    # if convergence != 'num_iterations':
+    #     num_iterations = max(num_iterations, 10000)
+    
+    if (n_lr_updates == 0) or (n_lr_updates is None): 
+        adjust_lr_every = num_iterations + 1
+    else:
+        adjust_lr_every = num_iterations // n_lr_updates
+
+    if n_samples is None:
+        n_samples = xyz.shape[0]
+    
+    for sdf_idx, sdf in enumerate(sdf_gt):
+        if clamp_dist is not None:
+            sdf = torch.clamp(sdf, -clamp_dist, clamp_dist)
+        
+        sdf_gt[sdf_idx] = sdf.cuda()
     # Figure out information about LR updates
 
     # Initialize latent vector
-    latent = torch.ones(1, latent_size).normal_(mean=latent_init_mean, std=latent_init_std)
+    # INITILAIZE DIRECTLY ON GPU
+    latent = torch.ones(1, latent_size, device=torch.device('cuda')).normal_(mean=latent_init_mean, std=latent_init_std)
     latent.requires_grad = True
 
     # Initialize optimizer
-    optimizer = torch.optim.Adam([latent], lr=lr)
+    if optimizer_name == 'adam':
+        optimizer = torch.optim.Adam([latent], lr=lr)
+    elif optimizer_name == 'lbfgs':
+        optimizer = torch.optim.LBFGS([latent])
 
     # Initialize loss
-    loss = 0
     if loss_type == 'l1':
         loss_fn = torch.nn.L1Loss()
     elif loss_type == 'l2':
@@ -441,51 +126,158 @@ def reconstruct_latent(
 
     # Initialize convergence tracking
     patience = 0
-    loss = 10 
-
-    for step in range(num_iterations):
+    loss = 100
+    recon_loss = 100
+    
+    # MOVE DECODERS TO GPU
+    # SET DECODERS TO EVAL SO NO BATCH NORM ETC.
+    for decoder in decoders:
         decoder.cuda()
         decoder.eval()
+    
+    # PASS XYZ TO GPU
+    xyz = xyz.cuda()
+    
+    for step in range(num_iterations):
 
         #update LR
-        adjust_learning_rate(
-            initial_lr=lr,
-            optimizer=optimizer,
-            iteration=step, 
-            decreased_by=lr_update_factor, 
-            adjust_lr_every=adjust_lr_every
-        )
+        if optimizer_name == 'adam':
+            adjust_learning_rate(
+                initial_lr=lr,
+                optimizer=optimizer,
+                iteration=step, 
+                decreased_by=lr_update_factor, 
+                adjust_lr_every=adjust_lr_every
+            )
 
-        optimizer.zero_grad()
+        def step_():
+            global recon_loss_
+            global latent_loss_
+            global loss_
+            recon_loss_ = 0
 
-        latent_input = latent.expand(n_samples, -1)
-        inputs = torch.cat([latent_input, xyz], dim=1).cuda()
+            optimizer.zero_grad()
 
-        pred_sdf = decoder(inputs)
+            latent_input = latent.expand(n_samples, -1)
+            if n_samples != xyz.shape[0]:
+                if len(sdf_gt) > 1:
+                    # get equal number of samples from each surface
+                    # the list pts_surface is a list that indicates
+                    # which surface each point in xyz belongs to
+                    n_samples_ = n_samples // len(sdf_gt)
+                    # pre allocate array to store random samples
+                    # rand_samp = []
+                    rand_samp = torch.empty(n_samples, dtype=torch.int64, device=torch.device('cuda'))
+                    for idx in range(len(sdf_gt)):
+                        # (pts_surface[] > 0).nonzero(as_tuple=True)[0]
+                        # get the locations of the points that belong to the current surface
+                        print(pts_surface.shape)
+                        pts_ = (pts_surface == idx).nonzero(as_tuple=True)[0]
+                        print(pts_.shape)
+                        # get a random permutation of the points
+                        perm = torch.randperm(pts_.shape[0])
+                        print(perm.shape)
+                        # get the number of points to sample from this surface
+                        print(n_samples_)
+                        pts_ = pts_[perm[:n_samples_]]
+                        print(pts_.shape)
+                        # store the points in the pre-allocated rand_samp array
+                        rand_samp[idx*n_samples_:(idx+1)*n_samples_] = pts_
+                        
+                        # pts_ = np.where(np.asarray(pts_surface) == idx)[0]
+                        # np.random.shuffle(pts_)
+                        # rand_samp.append(pts_[:n_samples_])
+                    
+                    # rand_samp = np.concatenate(rand_samp)
 
-        if clamp_dist is not None:
-            pred_sdf = torch.clamp(pred_sdf, -clamp_dist, clamp_dist)
+                    if len(rand_samp) < n_samples:
+                        # if we don't have enough points, then just take random points
+                        perm = torch.randperm(xyz.shape[0])
+                        _idx_ = perm[:n_samples-len(rand_samp)]
+                        rand_samp = torch.cat([rand_samp, _idx_], dim=0)
+                        # rand_samp = np.concatenate([rand_samp, _idx_], axis=0)
+                     
+                    # rand_samp = torch.from_numpy(rand_samp).cuda()                    
+                else:
+                    rand_samp = torch.randperm(xyz.shape[0])[:n_samples]
+                # rand_samp = torch.randperm(xyz.shape[0])[:n_samples]
+                xyz_input = xyz[rand_samp, ...]
+
+                sdf_gt_ = [x[rand_samp, ...] for x in sdf_gt]
+            else:
+                xyz_input = xyz
+                sdf_gt_ = sdf_gt
+            inputs = torch.cat([latent_input, xyz_input], dim=1)
+
+            #TODO: potentially store each decoder's loss and return it to track in wandb?
+            for decoder_idx, decoder in enumerate(decoders):
+                current_pt_idx = 0
+                while current_pt_idx < inputs.shape[0]:
+                    _loss_ = 0
+                    current_batch_size = min(max_batch_size, inputs.shape[0] - current_pt_idx)
+
+                    pred_sdf = decoder(inputs[current_pt_idx:current_pt_idx + current_batch_size, ...])
+
+                    if clamp_dist is not None:
+                        pred_sdf = torch.clamp(pred_sdf, -clamp_dist, clamp_dist)
+                    
+                    if pred_sdf.shape[1] == 1:
+                        _loss_ += loss_fn(pred_sdf, sdf_gt_[decoder_idx][current_pt_idx:current_pt_idx + current_batch_size, ...]) * loss_weight
+                    else:
+                        for sdf_idx in range(pred_sdf.shape[1]):
+                            if difficulty_weight is not None:
+                                error_sign = torch.sign(sdf_gt_[sdf_idx][current_pt_idx:current_pt_idx + current_batch_size, ...].squeeze() - pred_sdf[:, sdf_idx].squeeze())
+                                sdf_gt_sign = torch.sign(sdf_gt_[sdf_idx][current_pt_idx:current_pt_idx + current_batch_size, ...].squeeze())
+                                sample_weights = 1 + difficulty_weight * sdf_gt_sign * error_sign
+                            else:
+                                pass
+                                # sample_weights = torch.ones_like(pred_sdf[:,sdf_idx].squeeze())
+
+                            _loss_ += loss_fn(
+                                pred_sdf[:,sdf_idx].squeeze(), 
+                                sdf_gt_[sdf_idx][current_pt_idx:current_pt_idx + current_batch_size, ...].squeeze()
+                            ) * loss_weight # * sample_weights
+                    
+                    # send gradient from each batch of SDF values to latent
+                    _loss_.backward()
+                    # update the global loss
+                    recon_loss_ += _loss_
+
+                    current_pt_idx += current_batch_size
+                        
+            if l2reg is True:
+                latent_loss_ = latent_reg_weight * torch.mean(latent ** 2)
+                latent_loss_.backward()
+            else:
+                latent_loss_ = 0        
+            
+            loss_ = recon_loss_ + latent_loss_
+
+            # if optimizer_name =='adam':
+            #     return 
+
+
+            # loss_.backward()
+            return loss_
         
-        _loss_ = loss_fn(pred_sdf, sdf_gt) * loss_weight
-
-        if l2reg is True:
-            latent_loss_ = latent_reg_weight * torch.mean(latent ** 2)
-            loss_ = _loss_ + latent_loss_
-        else:
-            loss_ = _loss_
-
-        loss_.backward()
-        optimizer.step()
+        if optimizer_name == 'adam':
+            step_()
+            optimizer.step()
+        elif optimizer_name == 'lbfgs':
+            print('LBFGS step:', step)
+            optimizer.step(step_)
 
         if step % 50 == 0:
             print('Step: ', step, 'Loss: ', loss_.item())
-            print('\tLatent norm: ', latent.norm)
+            if verbose is True:
+                print('\tLatent norm: ', latent.norm)
         
-        if log_wandb is True:
+        if (log_wandb is True) and (step % log_wandb_step == 0):
             wandb.log({
+                'total_loss': loss_.item(),
                 'l1_loss': loss_.item(),
-                'recon_loss': _loss_.item(),
-                'latent_loss': latent_loss_.item(),
+                'recon_loss': recon_loss_.item(),
+                'latent_loss': latent_loss_.item() if l2reg is True else np.nan,
                 'latent_norm': latent.norm().item()
             })
 
@@ -499,9 +291,19 @@ def reconstruct_latent(
             
             if patience > convergence_patience:
                 print('Converged!')
+                print('Step: ', step)
                 break
         elif convergence == 'recon_loss':
-            raise Exception('Not implemented yet')
+            if recon_loss_ < recon_loss:
+                recon_loss = recon_loss_
+                latent_ = torch.clone(latent)
+                patience = 0
+            else:
+                patience += 1
+            if patience > convergence_patience:
+                print('Converged!')
+                print('Step: ', step)
+                break
         else:
             loss = loss_
             latent_ = torch.clone(latent)
@@ -510,10 +312,12 @@ def reconstruct_latent(
 
 def reconstruct_mesh(
     path,
-    decoder,
+    decoders,
     latent_size,
     num_iterations=1000,
     lr=5e-4,
+    batch_size=32**3,
+    batch_size_latent_recon=3*10**4,
     loss_weight=1.0,
     loss_type='l1',
     l2reg=False,
@@ -534,51 +338,180 @@ def reconstruct_mesh(
     fit_similarity=False,
     register_similarity=False,
     n_pts_per_axis_mean_mesh=128,
+    scale_all_meshes=True, #whether when scaling a model down the scale should be on all points in all meshes or not. 
+    mesh_to_scale=0, # PRETTY MUCH ASSUME ALWAYS SCALING FIRST MESH
+    decoder_to_scale=0, # PRETTY MUCH ASSUME ALWAYS SCALING FIRST DECODER
+    scale_method='max_rad',
+    verbose=False,
+    objects_per_decoder=1,
+    latent_optimizer_name='adam',
+    get_rand_pts=False,
+    n_pts_random=100000,
+    sigma_rand_pts = 0.001,
+    n_samples_chamfer=None,
+    n_samples_latent_recon=10000,
+    difficulty_weight_recon=None,
+    chamfer_norm=2,
 ):
-    if (fit_similarity is True) & (register_similarity is True):
+    """
+    Reconstructs mesh at path using decoders. 
+
+    NOTES: 
+    Assumes that length of path = sum(objects_per_decoder)
+    That is, 
+        path0_mesh = decoder0_mesh0
+        path1_mesh = decoder0_mesh1 OR decoder1_mesh0
+        etc. 
+    """
+
+    # Check if path is a single mesh or a list of meshes & set multi_object flag
+    if isinstance(path, str):
+        multi_object = False
+    elif isinstance(path, (list, tuple)):
+        multi_object = True
+        if isinstance(n_pts_random, (int, float)):
+            n_pts_random = [n_pts_random,] * len(path)
+        if isinstance(sigma_rand_pts, (int, float)):
+            sigma_rand_pts = [sigma_rand_pts,] * len(path)
+    
+    # make decoders a list so that it can be iterated over
+    if not isinstance(decoders,(list, tuple)):
+        decoders = [decoders,]
+    
+    # make objects_per_decoder a list so that it can be iterated over
+    if isinstance(objects_per_decoder, (list, tuple)):
+        assert len(objects_per_decoder) == len(decoders), 'If objects_per_decoder is a list, it must be the same length as decoders'
+        pass
+    elif isinstance(objects_per_decoder, int):
+        # if single int, assume that all decoders have the same number of objects
+        objects_per_decoder = [objects_per_decoder,] * len(decoders)
+
+    tic = time.time()
+
+    if (fit_similarity is True) and (register_similarity is True):
         raise Exception('Cannot fit similarity and register similarity at the same time')
     if register_similarity is True:
+        # if register first, then register new mesh to the mean of the decoder (zero latent vector)
+        # create mean mesh of only mesh, or "mesh_to_scale" if more than one. 
         mean_latent = torch.zeros(1, latent_size)
+        # create mean mesh, assume that using decoder_0 & mesh_0, but
+        # technically this can be specified. 
         mean_mesh = create_mesh(
-            decoder=decoder.cuda(),
+            decoder=decoders[decoder_to_scale].cuda(),
             latent_vector=mean_latent.cuda(),
             n_pts_per_axis=n_pts_per_axis_mean_mesh,
+            objects=objects_per_decoder[decoder_to_scale],
+            batch_size=batch_size,
+            verbose=verbose,
         )
 
-    result_ = read_mesh_get_sampled_pts(
-        path, 
-        center_pts= not fit_similarity,
-        #TODO: Add axis align back in - see code commented above for example
-        # axis_align=False,
-        norm_pts= not fit_similarity,
-        scale_method='max_rad',
-        get_random=False,
-        return_orig_mesh=True if (calc_symmetric_chamfer & return_unscaled) else False, # if want to calc, then need orig mesh
-        return_new_mesh=True if (calc_symmetric_chamfer & (return_unscaled==False)) else False,
-        return_orig_pts=True if (calc_symmetric_chamfer & return_unscaled) else False,
-        return_center=True, #return_unscaled,
-        return_scale=True, #return_unscaled,
-        register_to_mean_first=True if register_similarity else False,
-        mean_mesh=mean_mesh if register_similarity else None,
-    )
+        if objects_per_decoder[decoder_to_scale] > 1:
+            mean_mesh = mean_mesh[mesh_to_scale]
+
+        if mean_mesh is None:
+            # Mean mesh is None if the zero latent vector is not well defined/learned
+            # yet. In this case, the results will be very poor, might as well skip. 
+            result = {
+                'mesh': [None, ] * sum(objects_per_decoder),
+            }
+            if calc_symmetric_chamfer:
+                for idx in range(sum(objects_per_decoder)):
+                    result[f'chamfer_{idx}'] = np.nan
+            if calc_emd:
+                for idx in range(sum(objects_per_decoder)):
+                    result['emd_{idx}'] = np.nan
+            if return_latent:
+                result['latent'] = mean_latent
+            return result
+
+    toc = time.time()
+    time_load_mean = toc - tic
+    tic = time.time()
+    if verbose is True:
+        print(f'Loaded mean mesh in {time_load_mean:.2f} seconds')
+
+    # read in mesh(es) and get sampled points for fitting decoder too
+    # handle single or multiple meshes appropriately. 
+    if multi_object is False:
+        result_ = read_mesh_get_sampled_pts(
+            path,
+            sigma=sigma_rand_pts,
+            center_pts= not fit_similarity,
+            #TODO: Add axis align back in - see code commented above for example
+            # axis_align=False,
+            norm_pts= not fit_similarity,
+            scale_method=scale_method,
+            get_random=get_rand_pts,
+            return_orig_mesh=True if (calc_symmetric_chamfer & return_unscaled) else False, # if want to calc, then need orig mesh
+            return_new_mesh=True if (calc_symmetric_chamfer & (return_unscaled==False)) else False,
+            return_orig_pts=True if (calc_symmetric_chamfer & return_unscaled) else False,
+            return_center=True, #return_unscaled,
+            return_scale=True, #return_unscaled,
+            register_to_mean_first=True if register_similarity else False,
+            mean_mesh=mean_mesh if register_similarity else None,
+            n_pts_random=n_pts_random,
+            include_surf_in_pts=get_rand_pts
+        )
+    elif multi_object is True:
+        result_ = read_meshes_get_sampled_pts(
+            paths=path,
+            mean=[0,0,0],
+            sigma=sigma_rand_pts,
+            center_pts= not fit_similarity,
+            #TODO: Add axis align back in - see code commented above for example
+            # axis_align=False,
+            norm_pts= not fit_similarity,
+            scale_all_meshes=scale_all_meshes,
+            mesh_to_scale=mesh_to_scale,
+            scale_method=scale_method,
+            get_random=get_rand_pts,
+            return_orig_mesh=True if (calc_symmetric_chamfer & return_unscaled) else False, # if want to calc, then need orig mesh
+            return_new_mesh=True if (calc_symmetric_chamfer & (return_unscaled==False)) else False,
+            return_orig_pts=True if (calc_symmetric_chamfer & return_unscaled) else False,
+            register_to_mean_first=True if register_similarity else False,
+            mean_mesh=mean_mesh if register_similarity else None,
+            n_pts_random=n_pts_random,
+            include_surf_in_pts=get_rand_pts
+        )
 
     xyz = result_['pts']
     sdf_gt = result_['sdf']
+    pts_surface = result_['pts_surface'] 
+
+    # ensure all data are torch tensors and have the correct shape
     if not isinstance(xyz, torch.Tensor):
         xyz = torch.from_numpy(xyz).float()
-    if not isinstance(sdf_gt, torch.Tensor):
-        sdf_gt = torch.from_numpy(sdf_gt).float()
+    if multi_object is True:
+        for sdf_idx, sdf_gt_ in enumerate(sdf_gt):
+            if not isinstance(sdf_gt_, torch.Tensor):
+                sdf_gt[sdf_idx] = torch.from_numpy(sdf_gt_).float()
+                
+            if len(sdf_gt[sdf_idx].shape) == 1:
+                sdf_gt[sdf_idx] = sdf_gt[sdf_idx].unsqueeze(1)
+    elif multi_object is False:
+        if not isinstance(sdf_gt, torch.Tensor):
+            sdf_gt = torch.from_numpy(sdf_gt).float()
+
+        if len(sdf_gt.shape) == 1:
+            sdf_gt = sdf_gt.unsqueeze(1)
     
-    if len(sdf_gt.shape) == 1:
-        sdf_gt = sdf_gt.unsqueeze(1)
+    toc = time.time()
+    time_load_mesh = toc - tic
+    if verbose is True:
+        print(f'Loaded mesh in {time_load_mesh:.2f} seconds')
 
-    new_sdf = torch.cat([xyz, sdf_gt], dim=1)
+    tic = time.time()
 
+
+    # FIT THE LATENT CODE TO THE MESH
+    # specify general reconstruction parameters that apply to 
+    # all recon methods. 
     reconstruct_inputs = {
-        'decoder': decoder,
+        'decoders': decoders,
         'num_iterations': num_iterations,
         'latent_size': latent_size,
-        'new_sdf': new_sdf,
+        'sdf_gt': sdf_gt,
+        'xyz': xyz,
         'lr': lr,
         'loss_weight': loss_weight,
         'loss_type': loss_type,
@@ -592,13 +525,22 @@ def reconstruct_mesh(
         'log_wandb': log_wandb,
         'convergence': convergence,
         'convergence_patience': convergence_patience,
+        'verbose': verbose,
     }
 
+    # specify latent recon functions, and extra parameters if needed
     if fit_similarity is False:
+        recon_params_ = {
+            'max_batch_size': batch_size_latent_recon,
+            'optimizer_name': latent_optimizer_name,
+            'n_samples': n_samples_latent_recon,
+            'difficulty_weight': difficulty_weight_recon,
+            'pts_surface': pts_surface,
+        }
         reconstruct_function = reconstruct_latent
     elif fit_similarity is True:
         reconstruct_function = reconstruct_latent_S3
-        similarity_recon_params = {
+        recon_params_ = {
             'soft_contrain_scale': True,
             'scale_constrain_deviation': 0.05,
             'soft_constrain_theta': True,
@@ -609,90 +551,141 @@ def reconstruct_mesh(
             'transform_update_patience': 500
         }
 
-        reconstruct_inputs.update(similarity_recon_params)
+    
+    reconstruct_inputs.update(recon_params_)
     
     loss, latent = reconstruct_function(**reconstruct_inputs)
 
-    # TODO: apply the learned similarity transform stuff to the mesh? 
-    # if doing that, need to return more information from the reconstruction function
-    # could just include this informaton along with the latent? 
+    toc = time.time()
+    time_recon_latent = toc - tic
+    if verbose is True:
+        print(f'Reconstructed latent in {time_recon_latent:.2f} seconds')
+    tic = time.time()
+
+    # if fit_similarity is True, then set transform parameters
+    # for reconstructed mesh from the returned latent
     if fit_similarity is True:
         R = latent['R']
         t = latent['t']
         s = latent['s']
         latent = latent['latent']
-        
-        # Apply this transform to the points of the mesh and then update the mesh? 
-        # This is a PV mesh - so need a way to update the triangle positions for the 
-        # polygon mesh - does it do this (e.g., keep connectivity appropriately if just
-        # update the points?)
 
-        # NEED TO UPDATE THE BELOW MESH (create_mesh) TO USE THE R, t, s
-        # TO ALLOW RE-CREATION OF THE ORIGINAL MESH. 
     else:
         R = None
         t = None
         s = None
-    
-    #### ADD OPTIONS TO TAKE SCALE / CENTER / ICP TRANSFORM AND APPLY TO MESH
-    #### WITHOUT HAVING TO RELOAD
-    print(result_['icp_transform'])
-    mesh = create_mesh(
-        decoder=decoder.cuda(),
-        latent_vector=latent.cuda(),
-        n_pts_per_axis=n_pts_per_axis,
-        path_original_mesh=None,
-        offset=result_['center'],
-        scale=result_['scale'],
-        icp_transform=result_['icp_transform'],
-        R=R,
-        t=t,
-        s=s,
-    )
 
+    if verbose is True:
+        print(result_['icp_transform'])
+
+    # create mesh(es) from latent
+    meshes = []
+    for decoder_idx, decoder in enumerate(decoders):
+        # pass alignment parameters to return mesh to original position
+        # pass number of objects in case decoder is a multi-object decoder
+        mesh = create_mesh(
+            decoder=decoder.cuda(),
+            latent_vector=latent.cuda(),
+            n_pts_per_axis=n_pts_per_axis,
+            path_original_mesh=None,
+            offset=result_['center'],
+            scale=result_['scale'],
+            icp_transform=result_['icp_transform'],
+            R=R,
+            t=t,
+            s=s,
+            objects=objects_per_decoder[decoder_idx],
+            verbose=verbose,
+        )
+        if objects_per_decoder[decoder_idx] > 1:
+            # append sequentially so they match the order of meshes at "path"
+            for mesh_ in mesh:
+                meshes.append(mesh_)
+        else:
+            meshes.append(mesh)
+
+    toc = time.time()
+    time_create_mesh = toc - tic
+    if verbose is True:
+        print(f'Created mesh in {time_create_mesh:.2f} seconds')
+    tic = time.time()
+
+    # calculate loss metrics/surface error metrics. 
     if calc_symmetric_chamfer or calc_emd:
-        pts_recon = mskt.mesh.meshTools.get_mesh_physical_point_coords(mesh)
-        xyz_recon = torch.from_numpy(pts_recon).float()
+        pts_recon = []
+        # xyz_recon = []
+        xyz_orig = []
+        for mesh_idx, mesh in enumerate(meshes):
+            if mesh is not None:
+                pts_recon.append(mesh.point_coords)
+                # xyz_recon.append(torch.from_numpy(pts_recon[-1]).float())
+            else:
+                pts_recon.append(None)
+                # xyz_recon.append(None)
+            
+            xyz_orig_ = result_['orig_pts'][mesh_idx]
+            # if not isinstance(xyz_orig_, torch.Tensor):
+            #     xyz_orig_ = torch.from_numpy(xyz_orig_).float()
+            xyz_orig.append(xyz_orig_)
 
     if calc_symmetric_chamfer:
         if __chamfer__ is True:
-            xyz_orig = result_['orig_pts']
-            if not isinstance(xyz_orig, torch.Tensor):
-                xyz_orig = torch.from_numpy(xyz_orig).float()
-
+            chamfer_loss = []
+            for pts_idx in range(len(meshes)):
+                if pts_recon[pts_idx] is None:
+                    chamfer_loss.append(np.nan)
+                else:
+                    chamfer_loss_ = compute_chamfer(
+                        xyz_orig[pts_idx],
+                        pts_recon[pts_idx],
+                        num_samples=n_samples_chamfer,
+                        power=chamfer_norm
+                    )
+                    chamfer_loss.append(chamfer_loss_)
+                    # chamfer_loss_, _ = chamfer_distance(xyz_orig[pts_idx].unsqueeze(0), xyz_recon[pts_idx].unsqueeze(0))
+                    # chamfer_loss.append(chamfer_loss_.item())
             # print('general xyz mean, min, max', torch.mean(xyz, dim=0), torch.min(xyz, dim=0), torch.max(xyz, dim=0))
             # print('orig mean, min, max', torch.mean(xyz_orig, dim=0), torch.min(xyz_orig, dim=0), torch.max(xyz_orig, dim=0))
             # print('new mean, min, max', torch.mean(xyz_recon, dim=0), torch.min(xyz_recon, dim=0), torch.max(xyz_recon, dim=0))
-
-            chamfer_loss, _ = chamfer_distance(xyz_orig.unsqueeze(0), xyz_recon.unsqueeze(0))
-        
         elif __chamfer__ is False:
             raise ImportError('Cannot calculate symmetric chamfer distance without chamfer_pytorch module')
     
     if calc_emd:
         if __emd__ is True:
-            xyz_orig = result_['orig_pts']
-            if not isinstance(xyz_orig, torch.Tensor):
-                xyz_orig = torch.from_numpy(xyz_orig).float()
-
-            emd_loss, _, _ = sinkhorn(xyz_orig, xyz_new)
-        
+            emd_loss = []
+            for pts_idx in range(len(meshes)):
+                if pts_recon[pts_idx] is None:
+                    emd_loss.append(np.nan)
+                else:
+                    emd_loss_, _, _ = sinkhorn(xyz_orig[pts_idx], xyz_recon[pts_idx])
+                    emd_loss.append(emd_loss_.item())
         elif __emd__ is False:
             raise ImportError('Cannot calculate EMD without emd module') 
     
+    toc = time.time()
+    time_calc_metrics = toc - tic
+    if verbose is True:
+        print(f'Calculated metrics in {time_calc_metrics:.2f} seconds')
+
     if calc_emd or calc_symmetric_chamfer or return_latent:
-        result = {
-            'mesh': mesh,
-        }
+        result = {}
         if calc_symmetric_chamfer:
-            result['chamfer'] = chamfer_loss.item()
+            for idx, chamfer_loss in enumerate(chamfer_loss):
+                result[f'chamfer_{idx}'] = chamfer_loss
         if calc_emd:
-            result['emd'] = emd_loss.item()
+            for idx, emd_loss in enumerate(emd_loss):
+                result['emd_{idx}'] = emd_loss
         if return_latent:
             result['latent'] = latent
+        
+        if log_wandb is True:
+            wandb.log(result)
+        
+        result['mesh'] = meshes
+
         return result
     else:
-        return mesh
+        return meshes
 
 def tune_reconstruction(
     model,
@@ -701,20 +694,21 @@ def tune_reconstruction(
 ):
     if use_wandb is True:
         wandb.login(key=os.environ['WANDB_KEY'])
-        wandb.init(
-            # Set the project where this run will be logged
-            project=config["project_name"], # "diffusion-net-predict-sex",
-            entity=config["entity_name"], # "bone-modeling",
-            # Track hyperparameters and run metadata
-            config=config,
-            name=config['run_name'],
-            tags=config['tags']
-        )
+        # wandb.init(
+        #     # Set the project where this run will be logged
+        #     project=config["project_name"], # "diffusion-net-predict-sex",
+        #     entity=config["entity_name"], # "bone-modeling",
+        #     # Track hyperparameters and run metadata
+        #     config=config,
+        #     name=config['run_name'],
+        #     tags=config['tags']
+        # )
     
     dict_loss = get_mean_errors(
         mesh_paths=config['mesh_paths'],
-        decoder=model,
+        decoders=model,
         num_iterations=config['num_iterations'],
+        register_similarity=True,
         latent_size=config['latent_size'],
         lr=config['lr'],
         loss_weight=config['loss_weight'],
@@ -730,22 +724,60 @@ def tune_reconstruction(
         calc_emd=config['emd'],
         convergence=config['convergence'],
         convergence_patience=config['convergence_patience'],
-        log_wandb=True,
+        log_wandb=use_wandb,
+        verbose=config['verbose'],
+        objects_per_decoder=config['objects_per_decoder'],
+        batch_size_latent_recon=config['batch_size_latent_recon'],
+        get_rand_pts=config['get_rand_pts_recon'],
+        n_pts_random=config['n_pts_random_recon'],
+        sigma_rand_pts=config['sigma_rand_pts_recon'],
+        n_samples_latent_recon=config['n_samples_latent_recon'],
+        difficulty_weight_recon=config['difficulty_weight_recon'],
+        chamfer_norm=config['chamfer_norm'],
+        
+        config=config
+
+    
+    # '''
+    # mesh_paths=config['val_paths'],
+    # decoders=model,
+    # latent_size=config['latent_size'],
+    # calc_symmetric_chamfer=config['chamfer'],
+    # calc_emd=config['emd'],
+    # register_similarity=True,
+    # scale_all_meshes=True,
+    # objects_per_decoder=2,
+    # batch_size_latent_recon=config['batch_size_latent_recon'],
+    # verbose=config['verbose'],
+    # '''
+        
+        
+    # config=None, # THIS IS NOT USED IN `get_mean_errors`
+    # register_similarity=False,
+    # scale_all_meshes=True,
+    # model_type='deepsdf',
+    # point_cloud_size=1024,
+    # objects_per_decoder=1,
+    # mesh_to_scale=0,
+    # decoder_to_scale=0,
+    # batch_size_latent_recon=3*10**4,
+    # latent_optimizer_name='adam',
     )
 
-    if use_wandb is True:                    
-            wandb.log(
-                dict_loss
-            )
+    # if use_wandb is True:                    
+    #         wandb.log(
+    #             dict_loss
+    #         )
 
 def get_mean_errors(
     mesh_paths,
-    decoder,
+    decoders,
     latent_size,
     calc_symmetric_chamfer=False,
     calc_emd=False,
     log_wandb=False,
     num_iterations=1000,
+    n_pts_per_axis=256,
     lr=5e-4,
     loss_weight=1.0,
     loss_type='l1',
@@ -759,47 +791,127 @@ def get_mean_errors(
     convergence='num_iterations',
     convergence_patience=50,
     config=None,
+    register_similarity=False,
+    scale_all_meshes=True,
+    model_type='deepsdf',
+    point_cloud_size=1024,
+    verbose=False,
+    objects_per_decoder=1,
+    mesh_to_scale=0,
+    decoder_to_scale=0,
+    batch_size_latent_recon=3*10**4,
+    latent_optimizer_name='adam',
+    get_rand_pts=False,
+    n_pts_random=100000,
+    sigma_rand_pts=0.01,
+    n_samples_latent_recon=10000,
+    difficulty_weight_recon=None,
+    chamfer_norm=2,
 ):
     loss = {}
     if calc_symmetric_chamfer:
         chamfer = []
     if calc_emd:
         emd = []
+    
+    reconstruct_inputs = {
+        'latent_size':latent_size,
+        'calc_symmetric_chamfer':calc_symmetric_chamfer,
+        'calc_emd':calc_emd,
+        'register_similarity':register_similarity,
+        'scale_all_meshes':scale_all_meshes,
+        'return_latent': False
+    }
+        
+
+    if model_type == 'deepsdf':
+        reconstruct_inputs_ = {
+            'decoders':decoders,
+            'log_wandb':log_wandb,
+            'num_iterations':num_iterations,
+            'n_pts_per_axis':n_pts_per_axis,
+            'lr':lr,
+            'loss_weight':loss_weight,
+            'loss_type':loss_type,
+            'l2reg':l2reg,
+            'latent_init_std':latent_init_std,
+            'latent_init_mean':latent_init_mean,
+            'clamp_dist':clamp_dist,
+            'latent_reg_weight':latent_reg_weight,
+            'n_lr_updates':n_lr_updates,
+            'lr_update_factor':lr_update_factor,
+            'convergence':convergence,
+            'convergence_patience':convergence_patience,
+            'register_similarity':register_similarity,
+            'objects_per_decoder':objects_per_decoder,
+            'batch_size_latent_recon': batch_size_latent_recon,
+            'verbose': verbose,
+            'latent_optimizer_name': latent_optimizer_name,
+            'get_rand_pts': get_rand_pts,
+            'n_pts_random': n_pts_random,
+            'sigma_rand_pts': sigma_rand_pts,
+            'n_samples_latent_recon': n_samples_latent_recon,
+            'difficulty_weight_recon': difficulty_weight_recon,
+            'chamfer_norm': chamfer_norm,
+        }
+        
+        recon_fx = reconstruct_mesh
+    elif model_type == 'diffusion':
+        reconstruct_inputs_ = {
+            'model': decoders,
+            'n_encode_iterations': num_iterations,
+            'point_cloud_size': point_cloud_size,
+            'scale_to_original_mesh': True,
+        }
+        recon_fx = reconstruct_mesh_diffusion_sdf
+
+    reconstruct_inputs.update(reconstruct_inputs_)
 
     for idx, mesh_path in enumerate(mesh_paths):
-        result_ = reconstruct_mesh(
-            path=mesh_path,
-            decoder=decoder,
-            latent_size=latent_size,
-            calc_symmetric_chamfer=calc_symmetric_chamfer,
-            calc_emd=calc_emd,
-            log_wandb=log_wandb,
-            num_iterations=num_iterations,
-            lr=lr,
-            loss_weight=loss_weight,
-            loss_type=loss_type,
-            l2reg=l2reg,
-            latent_init_std=latent_init_std,
-            latent_init_mean=latent_init_mean,
-            clamp_dist=clamp_dist,
-            latent_reg_weight=latent_reg_weight,
-            n_lr_updates=n_lr_updates,
-            lr_update_factor=lr_update_factor,
-            convergence=convergence,
-            convergence_patience=convergence_patience,
+        if log_wandb is True:
+            config_ = config.copy()
+            config_['mesh_path'] = mesh_path
+            config_['mesh_idx'] = idx
+            wandb.init(
+                # Set the project where this run will be logged
+                project=config["project_name"], # "diffusion-net-predict-sex",
+                entity=config["entity_name"], # "bone-modeling",
+                # Track hyperparameters and run metadata
+                config=config_,
+                name=config['run_name'],
+                tags=config['tags']
+            )
+        reconstruct_inputs['path'] = mesh_path
+        result_ = recon_fx(
+            **reconstruct_inputs
         )
-        print('result_', result_)
-        if calc_symmetric_chamfer:
-            if idx == 0:
-                loss['chamfer'] = []
-            loss['chamfer'].append(result_['chamfer'])
-        if calc_emd:
-            if idx == 0:
-                loss['emd'] = []
-            loss['emd'].append(result_['emd'])
-    
-    for key, item in loss.items():
-        loss[key] = np.mean(item)
+        if verbose is True:
+            print('result_', result_)
+        for mesh_idx in range(len(result_['mesh'])):
+            if calc_symmetric_chamfer:
+                if idx == 0:
+                    loss[f'chamfer_{mesh_idx}'] = []
+                loss[f'chamfer_{mesh_idx}'].append(result_[f'chamfer_{mesh_idx}'])
+            if calc_emd:
+                if idx == 0:
+                    loss[f'emd_{mesh_idx}'] = []
+                loss[f'emd_{mesh_idx}'].append(result_[f'emd_{mesh_idx}'])
 
-    return loss
+        if log_wandb is True:
+            wandb.finish()
+    if verbose is True:
+        print('loss', loss)
+    loss_ = {}
+    for key, item in loss.items():
+        mean = np.mean(item)
+        std = np.std(item)
+        median = np.median(item)
+        hist = wandb.Histogram(item)
+        loss_[key] = mean
+        loss_[f'{key}_std'] = std
+        loss_[f'{key}_mean'] = mean
+        loss_[f'{key}_median'] = median
+        loss_[f'{key}_hist'] = hist
+
+    return loss_
 
