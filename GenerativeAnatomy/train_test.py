@@ -216,10 +216,11 @@ def test(model, test_loader, config, return_loss=False):
                 r2_loss  += loss_dict['R2']
 
                 if config['decoder_variance'] is True:
-                    print('preds length', len(preds))
-                    print('popping the variance dimension')
-                    _ = preds.pop(1)
-                    print('preds length', len(preds))
+                    if config['verbose'] is True:
+                        print('preds length', len(preds))
+                        print('popping the variance dimension')
+                        _ = preds.pop(1)
+                        print('preds length', len(preds))
 
                 # THE BELOW SHOULD BE REFORMATTED - SHOULD JUST UPDATE INDEXING IF len(preds[0].shape) ==3
                 if len(preds[0].shape) == 3:
