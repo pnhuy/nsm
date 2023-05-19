@@ -1,0 +1,54 @@
+# pymskt  - should push this to pypi so it can be installed with pip
+# diffusion_net
+
+#diffusion_net
+joblib   # ==1.0.1
+numpy   # ==1.20.2
+pillow   # ==8.2.0
+plyfile   # ==0.7.2
+polyscope   # ==0.1.6
+potpourri3d   # ==0.0.3
+python-utils   # ==2.5.6
+robust-laplacian   # ==0.2.4
+scikit-learn   # ==0.24.2
+scipy   # ==1.6.3
+six   # ==1.16.0
+sklearn   # ==0.0
+threadpoolctl   # ==2.1.0
+torch   # ==1.8.1
+torchaudio   # ==0.8.1
+torchvision   # ==0.9.1
+tqdm   # ==4.54.1
+typing-extensions   # ==3.10.0.0
+
+#pymskt - need others for pyfocusr, but dont need it right now. 
+cycpd
+pyfocusr
+cython
+pyacvd
+pyvista
+SimpleITK
+vtk
+param
+jupyter
+notebook
+traittypes
+
+wandb
+matplotlib
+
+# Requirements for sinkhorn (a wasserstein distance/earth movers distance algorithm)
+# https://github.com/fwilliams/scalable-pytorch-sinkhorn
+pykeops 
+tqdm
+
+# pytorch_scatter
+# https://github.com/rusty1s/pytorch_scatter
+
+
+einops
+
+scikit-image
+pandas
+
+pymeshfix
