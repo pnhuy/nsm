@@ -61,9 +61,7 @@ def train_deep_sdf(
 
     latent_vecs = get_latent_vecs(len(data_loader.dataset), config)
 
-    
-
-    optimizer = get_optimizer(model, latent_vecs, config['lr_schedules'], config["optimizer"])
+    optimizer = get_optimizer(model, latent_vecs, lr_schedules=config['lr_schedules'], optimizer=config["optimizer"], weight_decay=config["weight_decay"])
 
     for epoch in range(1, config['n_epochs'] + 1):
         # not passing latent_vecs because presumably they are being tracked by the

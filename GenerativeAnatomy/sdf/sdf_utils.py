@@ -145,7 +145,7 @@ def get_latent_vecs(num_objects, config):
 
     return lat_vecs
 
-def get_optimizer(model, latent_vecs, lr_schedules, optimizer="Adam",):
+def get_optimizer(model, latent_vecs, lr_schedules, optimizer="Adam", weight_decay=0.0001):
     if type(model) not in (list, tuple):
         model = [model]
     
@@ -166,7 +166,7 @@ def get_optimizer(model, latent_vecs, lr_schedules, optimizer="Adam",):
     if optimizer == "Adam":
         optimizer = torch.optim.Adam(list_params)
     elif optimizer == "AdamW":
-        optimizer = torch.optim.AdamW(list_params, weight_decay=0.0001)
+        optimizer = torch.optim.AdamW(list_params, weight_decay=weight_decay)
 
     return optimizer
 

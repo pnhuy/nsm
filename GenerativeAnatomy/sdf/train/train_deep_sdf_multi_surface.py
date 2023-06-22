@@ -63,7 +63,7 @@ def train_deep_sdf(
 
     latent_vecs = get_latent_vecs(len(data_loader.dataset), config).cuda()
 
-    optimizer = get_optimizer(model, latent_vecs, config['lr_schedules'], config["optimizer"])
+    optimizer = get_optimizer(model, latent_vecs, lr_schedules=config['lr_schedules'], optimizer=config["optimizer"], weight_decay=config["weight_decay"])
 
     # profiler that runs if config['profiler'] is True, else a dummy profiler is used and should have no effect
     with get_profiler(config) as profiler:
@@ -308,7 +308,7 @@ def train_epoch(
             
             batch_l1_loss += l1_loss.item()
             for l1_idx, l1_loss_ in enumerate(l1_losses):
-                batch_l1_losses.append(l1_loss_.sum().item())
+                batch_l1_losses[l1_idx] += l1_loss_.sum().item()
             chunk_loss = l1_loss
 
             if config['code_regularization'] is True:
@@ -344,8 +344,8 @@ def train_epoch(
         step_losses += batch_loss
         step_l1_loss += batch_l1_loss
         step_code_reg_loss += batch_code_reg_loss
-        for l1_idx, l1_loss_ in enumerate(l1_losses):
-            step_l1_losses[l1_idx] += l1_loss_.sum().item() # l1_loss_
+        for l1_idx, l1_loss_ in enumerate(batch_l1_losses):
+            step_l1_losses[l1_idx] += l1_loss_ # l1_loss_
         
         if config['grad_clip'] is not None:
             torch.nn.utils.clip_grad_norm_(
