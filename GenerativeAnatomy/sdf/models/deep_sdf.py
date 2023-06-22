@@ -47,7 +47,8 @@ class Decoder(nn.Module):
         final_activation="tanh", #"sin", "linear"
         concat_latent_input=False,
         progressive_add_depth=False,
-        progressive_depth_params=PROGRESSIVE_PARAMS
+        progressive_depth_params=PROGRESSIVE_PARAMS,
+
     ):
         """
         latent_size (int): size of the latent input vector to the decoder network
@@ -92,6 +93,7 @@ class Decoder(nn.Module):
         # self.activation = activation
 
         self.layers = nn.ModuleList()
+        self.bn = nn.ModuleList()
         
         # Add the rest of the layers
         for layer in range(len(self.dims)-1):
@@ -101,8 +103,11 @@ class Decoder(nn.Module):
             # initialize the weights - particularly for the sine activation
             init_weights(module=lin_layer, activation=self._activation_, first_layer=layer==0)
             # add weight norm if specified
-            if weight_norm is True and layer in self.norm_layers:
+            # if weight_norm is True and layer in self.norm_layers:
+            if weight_norm is True:
                 lin_layer = nn.utils.weight_norm(lin_layer)
+            elif self.norm_layers is not None and layer in self.norm_layers:
+                self.bn.append(nn.LayerNorm(out_dim))
             self.layers.append(lin_layer)
             
         
@@ -218,6 +223,8 @@ class Decoder(nn.Module):
             # hidden layers (not output)
             if layer_idx < len(self.layers) - 1:
 
+                if len(self.bn) > 0 and layer_idx in self.norm_layers:
+                    x = self.bn[layer_idx](x)
                 x = self.activation(x)
 
                 if self.dropout is not None and layer_idx in self.dropout:  #and (self._activation_ != "sin")
