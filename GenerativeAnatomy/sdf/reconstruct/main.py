@@ -1,11 +1,9 @@
 import torch
 
-from .reconstruct_diffusion_sdf import reconstruct_mesh_diffusion_sdf
 from .utils import (
     compute_chamfer,
     adjust_learning_rate
 )
-from .reconstruct_latent_S3 import reconstruct_latent_S3
 
 from GenerativeAnatomy.sdf.datasets import (
     read_mesh_get_sampled_pts, 
@@ -13,6 +11,9 @@ from GenerativeAnatomy.sdf.datasets import (
     read_meshes_get_sampled_pts
 )
 from GenerativeAnatomy.sdf.mesh import create_mesh
+
+from .reconstruct_latent_S3 import reconstruct_latent_S3
+from .reconstruct_diffusion_sdf import reconstruct_mesh_diffusion_sdf
 
 # from GenerativeAnatomy.sdf.testing import get_mean_errors
 import numpy as np
@@ -79,8 +80,6 @@ def reconstruct_latent(
     else:
         raise Exception('Invalid sdf_gt type')
     
-    print(pts_surface.shape)
-
     if isinstance(pts_surface, (list, tuple)):
         pts_surface = torch.tensor(pts_surface).cuda()
     elif isinstance(pts_surface, np.ndarray):
@@ -88,29 +87,28 @@ def reconstruct_latent(
 
     if not isinstance(decoders, (list, tuple)):
         decoders = [decoders,]
-
-    # if convergence != 'num_iterations':
-    #     num_iterations = max(num_iterations, 10000)
     
+    # Setup n LR updates
     if (n_lr_updates == 0) or (n_lr_updates is None): 
         adjust_lr_every = num_iterations + 1
     else:
         adjust_lr_every = num_iterations // n_lr_updates
 
+    # Setup n_samples, if not specified. 
     if n_samples is None:
         n_samples = xyz.shape[0]
     
+    # Set a clamp (maximum) distance to "model"
     for sdf_idx, sdf in enumerate(sdf_gt):
         if clamp_dist is not None:
             sdf = torch.clamp(sdf, -clamp_dist, clamp_dist)
-        
+        # Move to GPU
         sdf_gt[sdf_idx] = sdf.cuda()
-    # Figure out information about LR updates
 
-    # Initialize latent vector
-    # INITILAIZE DIRECTLY ON GPU
+    # Initialize random latent vector directly on GPU
     latent = torch.ones(1, latent_size, device=torch.device('cuda')).normal_(mean=latent_init_mean, std=latent_init_std)
     latent.requires_grad = True
+    latent_input = latent.expand(n_samples, -1)
 
     # Initialize optimizer
     if optimizer_name == 'adam':
@@ -120,9 +118,9 @@ def reconstruct_latent(
 
     # Initialize loss
     if loss_type == 'l1':
-        loss_fn = torch.nn.L1Loss()
+        loss_fn = torch.nn.L1Loss(reduction='none')
     elif loss_type == 'l2':
-        loss_fn = torch.nn.MSELoss()
+        loss_fn = torch.nn.MSELoss(reduction='none')
 
     # Initialize convergence tracking
     patience = 0
@@ -158,93 +156,94 @@ def reconstruct_latent(
 
             optimizer.zero_grad()
 
-            latent_input = latent.expand(n_samples, -1)
             if n_samples != xyz.shape[0]:
+                # Below if/else is just to get a list of indices to sample
                 if len(sdf_gt) > 1:
                     # get equal number of samples from each surface
                     # the list pts_surface is a list that indicates
                     # which surface each point in xyz belongs to
                     n_samples_ = n_samples // len(sdf_gt)
                     # pre allocate array to store random samples
-                    # rand_samp = []
                     rand_samp = torch.empty(n_samples, dtype=torch.int64, device=torch.device('cuda'))
                     for idx in range(len(sdf_gt)):
-                        # (pts_surface[] > 0).nonzero(as_tuple=True)[0]
                         # get the locations of the points that belong to the current surface
-                        print(pts_surface.shape)
                         pts_ = (pts_surface == idx).nonzero(as_tuple=True)[0]
-                        print(pts_.shape)
                         # get a random permutation of the points
                         perm = torch.randperm(pts_.shape[0])
-                        print(perm.shape)
-                        # get the number of points to sample from this surface
-                        print(n_samples_)
+                        # get the randomly permuted indices from this surface
                         pts_ = pts_[perm[:n_samples_]]
-                        print(pts_.shape)
                         # store the points in the pre-allocated rand_samp array
                         rand_samp[idx*n_samples_:(idx+1)*n_samples_] = pts_
-                        
-                        # pts_ = np.where(np.asarray(pts_surface) == idx)[0]
-                        # np.random.shuffle(pts_)
-                        # rand_samp.append(pts_[:n_samples_])
                     
-                    # rand_samp = np.concatenate(rand_samp)
-
                     if len(rand_samp) < n_samples:
                         # if we don't have enough points, then just take random points
                         perm = torch.randperm(xyz.shape[0])
                         _idx_ = perm[:n_samples-len(rand_samp)]
                         rand_samp = torch.cat([rand_samp, _idx_], dim=0)
-                        # rand_samp = np.concatenate([rand_samp, _idx_], axis=0)
-                     
-                    # rand_samp = torch.from_numpy(rand_samp).cuda()                    
                 else:
                     rand_samp = torch.randperm(xyz.shape[0])[:n_samples]
-                # rand_samp = torch.randperm(xyz.shape[0])[:n_samples]
-                xyz_input = xyz[rand_samp, ...]
 
+                # Use rand_samp indices to get xyz and sdf_gt
+                xyz_input = xyz[rand_samp, ...]
                 sdf_gt_ = [x[rand_samp, ...] for x in sdf_gt]
             else:
+                # if n_samples == xyz.shape[0], then just use all of the xyz points and sdf_gt
                 xyz_input = xyz
                 sdf_gt_ = sdf_gt
+            
+            # concat latent and xyz that will be inputted into decoder. 
             inputs = torch.cat([latent_input, xyz_input], dim=1)
 
             #TODO: potentially store each decoder's loss and return it to track in wandb?
+
+            # Iterate over the decoders (if there are multiple)
             for decoder_idx, decoder in enumerate(decoders):
                 current_pt_idx = 0
+
+                # Iterate over points in xyz_input 
                 while current_pt_idx < inputs.shape[0]:
-                    _loss_ = 0
+                    # Get batch size & predict sdf
                     current_batch_size = min(max_batch_size, inputs.shape[0] - current_pt_idx)
-
                     pred_sdf = decoder(inputs[current_pt_idx:current_pt_idx + current_batch_size, ...])
+                    
+                    # initialize loss as zeros
+                    _loss_ = torch.zeros(current_batch_size, device=torch.device('cuda'))
 
+                    # Apply clamping distance - to ignore points that are too far away
                     if clamp_dist is not None:
                         pred_sdf = torch.clamp(pred_sdf, -clamp_dist, clamp_dist)
                     
+                    # Compute loss
                     if pred_sdf.shape[1] == 1:
+                        # if only one surface - then just loss_fn (l1/l2) between pred_sdf and sdf_gt
+                        if difficulty_weight is not None:
+                            raise NotImplementedError
                         _loss_ += loss_fn(pred_sdf, sdf_gt_[decoder_idx][current_pt_idx:current_pt_idx + current_batch_size, ...]) * loss_weight
+                        
                     else:
+                        # if multiple surfaces - then compute loss for each surface and weight them
                         for sdf_idx in range(pred_sdf.shape[1]):
                             if difficulty_weight is not None:
                                 error_sign = torch.sign(sdf_gt_[sdf_idx][current_pt_idx:current_pt_idx + current_batch_size, ...].squeeze() - pred_sdf[:, sdf_idx].squeeze())
                                 sdf_gt_sign = torch.sign(sdf_gt_[sdf_idx][current_pt_idx:current_pt_idx + current_batch_size, ...].squeeze())
                                 sample_weights = 1 + difficulty_weight * sdf_gt_sign * error_sign
                             else:
-                                pass
-                                # sample_weights = torch.ones_like(pred_sdf[:,sdf_idx].squeeze())
-
+                                sample_weights = torch.ones_like(pred_sdf[:,sdf_idx].squeeze())
                             _loss_ += loss_fn(
                                 pred_sdf[:,sdf_idx].squeeze(), 
                                 sdf_gt_[sdf_idx][current_pt_idx:current_pt_idx + current_batch_size, ...].squeeze()
-                            ) * loss_weight # * sample_weights
+                            ) * loss_weight * sample_weights
                     
                     # send gradient from each batch of SDF values to latent
+                    _loss_ = torch.mean(_loss_)
                     _loss_.backward()
                     # update the global loss
                     recon_loss_ += _loss_
 
                     current_pt_idx += current_batch_size
-                        
+            
+            # Compute latent loss - used to constrain new predictions to be close to zero (mean)
+            # penalizing "abnormal" shapes
             if l2reg is True:
                 latent_loss_ = latent_reg_weight * torch.mean(latent ** 2)
                 latent_loss_.backward()
@@ -260,6 +259,7 @@ def reconstruct_latent(
             # loss_.backward()
             return loss_
         
+        # Run the step_ (defined above) and the appropriate optimizer
         if optimizer_name == 'adam':
             step_()
             optimizer.step()
@@ -267,11 +267,13 @@ def reconstruct_latent(
             print('LBFGS step:', step)
             optimizer.step(step_)
 
+        # Print progress/loss as appropriate
         if step % 50 == 0:
             print('Step: ', step, 'Loss: ', loss_.item())
             if verbose is True:
                 print('\tLatent norm: ', latent.norm)
         
+        # Log to wandb as appropriate
         if (log_wandb is True) and (step % log_wandb_step == 0):
             wandb.log({
                 'total_loss': loss_.item(),
@@ -281,6 +283,7 @@ def reconstruct_latent(
                 'latent_norm': latent.norm().item()
             })
 
+        # Handle end of loop accounting of loss/latent based on convergence criteria
         if convergence == 'overall_loss':
             if loss_ < loss:
                 loss = loss_
@@ -300,6 +303,7 @@ def reconstruct_latent(
                 patience = 0
             else:
                 patience += 1
+                
             if patience > convergence_patience:
                 print('Converged!')
                 print('Step: ', step)
@@ -338,7 +342,7 @@ def reconstruct_mesh(
     fit_similarity=False,
     register_similarity=False,
     n_pts_per_axis_mean_mesh=128,
-    scale_all_meshes=True, #whether when scaling a model down the scale should be on all points in all meshes or not. 
+    scale_all_meshes=True, #whether when scaling a model it should be on all points in all meshes or not
     mesh_to_scale=0, # PRETTY MUCH ASSUME ALWAYS SCALING FIRST MESH
     decoder_to_scale=0, # PRETTY MUCH ASSUME ALWAYS SCALING FIRST DECODER
     scale_method='max_rad',
@@ -369,19 +373,21 @@ def reconstruct_mesh(
         multi_object = False
     elif isinstance(path, (list, tuple)):
         multi_object = True
+        # appropriately set the number of random points for multi-object reconstructions
         if isinstance(n_pts_random, (int, float)):
             n_pts_random = [n_pts_random,] * len(path)
         if isinstance(sigma_rand_pts, (int, float)):
             sigma_rand_pts = [sigma_rand_pts,] * len(path)
+    else:
+        raise ValueError('path must be a string or a list/tuple of strings')
     
-    # make decoders a list so that it can be iterated over
+    # make decoders a list so that it can be iterated over (make agnostic to number of decoders)
     if not isinstance(decoders,(list, tuple)):
         decoders = [decoders,]
     
     # make objects_per_decoder a list so that it can be iterated over
     if isinstance(objects_per_decoder, (list, tuple)):
         assert len(objects_per_decoder) == len(decoders), 'If objects_per_decoder is a list, it must be the same length as decoders'
-        pass
     elif isinstance(objects_per_decoder, int):
         # if single int, assume that all decoders have the same number of objects
         objects_per_decoder = [objects_per_decoder,] * len(decoders)
@@ -389,13 +395,13 @@ def reconstruct_mesh(
     tic = time.time()
 
     if (fit_similarity is True) and (register_similarity is True):
-        raise Exception('Cannot fit similarity and register similarity at the same time')
+        raise ValueError('Cannot fit similarity and register similarity at the same time')
     if register_similarity is True:
         # if register first, then register new mesh to the mean of the decoder (zero latent vector)
-        # create mean mesh of only mesh, or "mesh_to_scale" if more than one. 
+        # create mean mesh of only mesh, or "mesh_to_scale" if more than one.
         mean_latent = torch.zeros(1, latent_size)
         # create mean mesh, assume that using decoder_0 & mesh_0, but
-        # technically this can be specified. 
+        # technically this can be specified.
         mean_mesh = create_mesh(
             decoder=decoders[decoder_to_scale].cuda(),
             latent_vector=mean_latent.cuda(),
@@ -410,7 +416,7 @@ def reconstruct_mesh(
 
         if mean_mesh is None:
             # Mean mesh is None if the zero latent vector is not well defined/learned
-            # yet. In this case, the results will be very poor, might as well skip. 
+            # yet. In this case, the results will be very poor, might as well skip.
             result = {
                 'mesh': [None, ] * sum(objects_per_decoder),
             }
@@ -423,6 +429,8 @@ def reconstruct_mesh(
             if return_latent:
                 result['latent'] = mean_latent
             return result
+    else:
+        mean_mesh = None
 
     toc = time.time()
     time_load_mean = toc - tic
@@ -437,14 +445,12 @@ def reconstruct_mesh(
             path,
             sigma=sigma_rand_pts,
             center_pts= not fit_similarity,
-            #TODO: Add axis align back in - see code commented above for example
-            # axis_align=False,
             norm_pts= not fit_similarity,
             scale_method=scale_method,
             get_random=get_rand_pts,
-            return_orig_mesh=True if (calc_symmetric_chamfer & return_unscaled) else False, # if want to calc, then need orig mesh
-            return_new_mesh=True if (calc_symmetric_chamfer & (return_unscaled==False)) else False,
-            return_orig_pts=True if (calc_symmetric_chamfer & return_unscaled) else False,
+            return_orig_mesh=True if (calc_symmetric_chamfer and return_unscaled) else False, # if want to calc, then need orig mesh
+            return_new_mesh=True if (calc_symmetric_chamfer and (return_unscaled==False)) else False,
+            return_orig_pts=True if (calc_symmetric_chamfer and return_unscaled) else False,
             return_center=True, #return_unscaled,
             return_scale=True, #return_unscaled,
             register_to_mean_first=True if register_similarity else False,
@@ -458,8 +464,6 @@ def reconstruct_mesh(
             mean=[0,0,0],
             sigma=sigma_rand_pts,
             center_pts= not fit_similarity,
-            #TODO: Add axis align back in - see code commented above for example
-            # axis_align=False,
             norm_pts= not fit_similarity,
             scale_all_meshes=scale_all_meshes,
             mesh_to_scale=mesh_to_scale,
@@ -469,14 +473,16 @@ def reconstruct_mesh(
             return_new_mesh=True if (calc_symmetric_chamfer & (return_unscaled==False)) else False,
             return_orig_pts=True if (calc_symmetric_chamfer & return_unscaled) else False,
             register_to_mean_first=True if register_similarity else False,
-            mean_mesh=mean_mesh if register_similarity else None,
+            mean_mesh=mean_mesh,
             n_pts_random=n_pts_random,
             include_surf_in_pts=get_rand_pts
         )
+    else:
+        raise ValueError('multi_object must be True or False')
 
     xyz = result_['pts']
     sdf_gt = result_['sdf']
-    pts_surface = result_['pts_surface'] 
+    pts_surface = result_['pts_surface']
 
     # ensure all data are torch tensors and have the correct shape
     if not isinstance(xyz, torch.Tensor):
@@ -485,7 +491,7 @@ def reconstruct_mesh(
         for sdf_idx, sdf_gt_ in enumerate(sdf_gt):
             if not isinstance(sdf_gt_, torch.Tensor):
                 sdf_gt[sdf_idx] = torch.from_numpy(sdf_gt_).float()
-                
+
             if len(sdf_gt[sdf_idx].shape) == 1:
                 sdf_gt[sdf_idx] = sdf_gt[sdf_idx].unsqueeze(1)
     elif multi_object is False:
@@ -494,7 +500,7 @@ def reconstruct_mesh(
 
         if len(sdf_gt.shape) == 1:
             sdf_gt = sdf_gt.unsqueeze(1)
-    
+
     toc = time.time()
     time_load_mesh = toc - tic
     if verbose is True:
@@ -502,10 +508,9 @@ def reconstruct_mesh(
 
     tic = time.time()
 
-
     # FIT THE LATENT CODE TO THE MESH
-    # specify general reconstruction parameters that apply to 
-    # all recon methods. 
+    # specify general reconstruction parameters that apply to
+    # all recon methods.
     reconstruct_inputs = {
         'decoders': decoders,
         'num_iterations': num_iterations,
@@ -530,6 +535,7 @@ def reconstruct_mesh(
 
     # specify latent recon functions, and extra parameters if needed
     if fit_similarity is False:
+        reconstruct_function = reconstruct_latent
         recon_params_ = {
             'max_batch_size': batch_size_latent_recon,
             'optimizer_name': latent_optimizer_name,
@@ -537,7 +543,7 @@ def reconstruct_mesh(
             'difficulty_weight': difficulty_weight_recon,
             'pts_surface': pts_surface,
         }
-        reconstruct_function = reconstruct_latent
+ 
     elif fit_similarity is True:
         reconstruct_function = reconstruct_latent_S3
         recon_params_ = {
@@ -550,10 +556,11 @@ def reconstruct_mesh(
             'init_scale_method': 'max_rad',
             'transform_update_patience': 500
         }
+    else:
+        raise ValueError('fit_similarity must be True or False')
 
-    
     reconstruct_inputs.update(recon_params_)
-    
+
     loss, latent = reconstruct_function(**reconstruct_inputs)
 
     toc = time.time()
@@ -610,22 +617,17 @@ def reconstruct_mesh(
         print(f'Created mesh in {time_create_mesh:.2f} seconds')
     tic = time.time()
 
-    # calculate loss metrics/surface error metrics. 
+    # calculate loss metrics/surface error metrics.
     if calc_symmetric_chamfer or calc_emd:
         pts_recon = []
-        # xyz_recon = []
         xyz_orig = []
         for mesh_idx, mesh in enumerate(meshes):
             if mesh is not None:
                 pts_recon.append(mesh.point_coords)
-                # xyz_recon.append(torch.from_numpy(pts_recon[-1]).float())
             else:
                 pts_recon.append(None)
-                # xyz_recon.append(None)
-            
+
             xyz_orig_ = result_['orig_pts'][mesh_idx]
-            # if not isinstance(xyz_orig_, torch.Tensor):
-            #     xyz_orig_ = torch.from_numpy(xyz_orig_).float()
             xyz_orig.append(xyz_orig_)
 
     if calc_symmetric_chamfer:
@@ -642,14 +644,10 @@ def reconstruct_mesh(
                         power=chamfer_norm
                     )
                     chamfer_loss.append(chamfer_loss_)
-                    # chamfer_loss_, _ = chamfer_distance(xyz_orig[pts_idx].unsqueeze(0), xyz_recon[pts_idx].unsqueeze(0))
-                    # chamfer_loss.append(chamfer_loss_.item())
-            # print('general xyz mean, min, max', torch.mean(xyz, dim=0), torch.min(xyz, dim=0), torch.max(xyz, dim=0))
-            # print('orig mean, min, max', torch.mean(xyz_orig, dim=0), torch.min(xyz_orig, dim=0), torch.max(xyz_orig, dim=0))
-            # print('new mean, min, max', torch.mean(xyz_recon, dim=0), torch.min(xyz_recon, dim=0), torch.max(xyz_recon, dim=0))
+
         elif __chamfer__ is False:
             raise ImportError('Cannot calculate symmetric chamfer distance without chamfer_pytorch module')
-    
+
     if calc_emd:
         if __emd__ is True:
             emd_loss = []
@@ -657,11 +655,11 @@ def reconstruct_mesh(
                 if pts_recon[pts_idx] is None:
                     emd_loss.append(np.nan)
                 else:
-                    emd_loss_, _, _ = sinkhorn(xyz_orig[pts_idx], xyz_recon[pts_idx])
+                    emd_loss_, _, _ = sinkhorn(xyz_orig[pts_idx], pts_recon[pts_idx])
                     emd_loss.append(emd_loss_.item())
         elif __emd__ is False:
-            raise ImportError('Cannot calculate EMD without emd module') 
-    
+            raise ImportError('Cannot calculate EMD without emd module')
+
     toc = time.time()
     time_calc_metrics = toc - tic
     if verbose is True:
@@ -670,14 +668,14 @@ def reconstruct_mesh(
     if calc_emd or calc_symmetric_chamfer or return_latent:
         result = {}
         if calc_symmetric_chamfer:
-            for idx, chamfer_loss in enumerate(chamfer_loss):
-                result[f'chamfer_{idx}'] = chamfer_loss
+            for idx, chamfer_loss_ in enumerate(chamfer_loss):
+                result[f'chamfer_{idx}'] = chamfer_loss_
         if calc_emd:
-            for idx, emd_loss in enumerate(emd_loss):
-                result['emd_{idx}'] = emd_loss
+            for idx, emd_loss_ in enumerate(emd_loss):
+                result['emd_{idx}'] = emd_loss_
         if return_latent:
             result['latent'] = latent
-        
+
         if log_wandb is True:
             wandb.log(result)
         
@@ -689,9 +687,12 @@ def reconstruct_mesh(
 
 def tune_reconstruction(
     model,
-    config,     
+    config,
     use_wandb=True
 ):
+    """
+    Tune reconstruction parameters using wandb for logging.
+    """
     if use_wandb is True:
         wandb.login(key=os.environ['WANDB_KEY'])
         # wandb.init(
@@ -734,40 +735,8 @@ def tune_reconstruction(
         n_samples_latent_recon=config['n_samples_latent_recon'],
         difficulty_weight_recon=config['difficulty_weight_recon'],
         chamfer_norm=config['chamfer_norm'],
-        
         config=config
-
-    
-    # '''
-    # mesh_paths=config['val_paths'],
-    # decoders=model,
-    # latent_size=config['latent_size'],
-    # calc_symmetric_chamfer=config['chamfer'],
-    # calc_emd=config['emd'],
-    # register_similarity=True,
-    # scale_all_meshes=True,
-    # objects_per_decoder=2,
-    # batch_size_latent_recon=config['batch_size_latent_recon'],
-    # verbose=config['verbose'],
-    # '''
-        
-        
-    # config=None, # THIS IS NOT USED IN `get_mean_errors`
-    # register_similarity=False,
-    # scale_all_meshes=True,
-    # model_type='deepsdf',
-    # point_cloud_size=1024,
-    # objects_per_decoder=1,
-    # mesh_to_scale=0,
-    # decoder_to_scale=0,
-    # batch_size_latent_recon=3*10**4,
-    # latent_optimizer_name='adam',
     )
-
-    # if use_wandb is True:                    
-    #         wandb.log(
-    #             dict_loss
-    #         )
 
 def get_mean_errors(
     mesh_paths,
@@ -808,11 +777,11 @@ def get_mean_errors(
     difficulty_weight_recon=None,
     chamfer_norm=2,
 ):
+    """
+    Reconstruct meshes & compute errors    
+    """
+
     loss = {}
-    if calc_symmetric_chamfer:
-        chamfer = []
-    if calc_emd:
-        emd = []
     
     reconstruct_inputs = {
         'latent_size':latent_size,
@@ -822,7 +791,6 @@ def get_mean_errors(
         'scale_all_meshes':scale_all_meshes,
         'return_latent': False
     }
-        
 
     if model_type == 'deepsdf':
         reconstruct_inputs_ = {
@@ -854,7 +822,7 @@ def get_mean_errors(
             'difficulty_weight_recon': difficulty_weight_recon,
             'chamfer_norm': chamfer_norm,
         }
-        
+
         recon_fx = reconstruct_mesh
     elif model_type == 'diffusion':
         reconstruct_inputs_ = {
@@ -864,6 +832,8 @@ def get_mean_errors(
             'scale_to_original_mesh': True,
         }
         recon_fx = reconstruct_mesh_diffusion_sdf
+    else:
+        raise ValueError(f'model_type must be either "deepsdf" or "diffusion"m received {model_type}')
 
     reconstruct_inputs.update(reconstruct_inputs_)
 
