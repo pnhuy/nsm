@@ -6,6 +6,7 @@ from vtk.util.numpy_support import numpy_to_vtk
 import torch
 import hashlib
 from datetime import datetime
+import warnings
 
 today_date = datetime.now().strftime("%b_%d_%Y")
 
@@ -92,6 +93,9 @@ def get_pts_center_and_scale(
     return_pts=False,
     pts_center=None
 ):
+    """
+    Given a set of points, returns the center and scale of the points.
+    """
 
     # If pts_cener is not None, then use that to center the points
     # and use all of the points in pts to scale. This is used for
@@ -106,12 +110,12 @@ def get_pts_center_and_scale(
         scale = np.max(norm(pts), axis=-1)
         pts /= scale
     else:
-        raise Exception(f'Scale Method ** {scale_method} ** Not Implemented')
+        raise NotImplementedError(f'Scale Method ** {scale_method} ** Not Implemented')
     
     if return_pts is True:
         return center, scale, pts
-    else:
-        return center, scale
+    
+    return center, scale
 
 
 # def read_mesh_get_scaled_pts(
@@ -296,8 +300,6 @@ def read_meshes_get_sampled_pts(
     n_pts=[200000, 200000], 
     rand_function='normal', 
     center_pts=True,
-    #TODO: Add axis align back in - see code commented above for example
-    # axis_align=False,
     scale_all_meshes=True,
     center_all_meshes=False,
     mesh_to_scale=0,
@@ -307,8 +309,6 @@ def read_meshes_get_sampled_pts(
     return_orig_mesh=False,
     return_new_mesh=False,
     return_orig_pts=False,
-    return_scale=False,
-    return_center=False,
     register_to_mean_first=False,
     mean_mesh=None,
     verbose=False,
@@ -319,24 +319,33 @@ def read_meshes_get_sampled_pts(
     """
     Function to read in and sample points from multiple meshes.
     """
+    list_deprecated = ['return_scale', 'return_center']
+    for kwarg in kwargs:
+        if kwarg in list_deprecated:
+            print(f'{kwarg} is deprecated and not used in this function - always True')
 
     results = {}
 
+    # Read all meshes and store in list
     orig_meshes = []
     orig_pts = []
     for path in paths:
         mesh = mskt.mesh.Mesh(path)
+        # fixing meshes ensures they are not degenerate
+        # degenerate meshes will cause issues fitting SDFs. 
         if fix_mesh is True:
             n_pts_orig = mesh.point_coords.shape[0]
             mesh.fix_mesh()
             n_pts_fixed = mesh.point_coords.shape[0]
-            # Asserting that no more than 1% of the mesh points were removed
-            print(f'Fixed mesh, {n_pts_orig} -> {n_pts_fixed} ({(n_pts_fixed - n_pts_orig) / n_pts_orig * 100:.2f}%)')
+            # Warning if more than 1% of the mesh points were removed
+            warnings.warn(f'Fixed mesh, {n_pts_orig} -> {n_pts_fixed} ({(n_pts_fixed - n_pts_orig) / n_pts_orig * 100:.2f}%)', Warning)
+            #TODO: Update to an assertion?
             # assert (n_pts_fixed - n_pts_orig) > -0.01 * n_pts_orig, f'Mesh was not fixed correctly, {n_pts_orig} -> {n_pts_fixed}'
 
         orig_meshes.append(mesh)
         orig_pts.append(mesh.point_coords)
-    
+
+    # Copy all meshes & points to new lists
     new_meshes = []
     new_pts = []
     for mesh_idx, orig_mesh in enumerate(orig_meshes):
@@ -345,13 +354,13 @@ def read_meshes_get_sampled_pts(
         new_meshes.append(new_mesh_)
 
     if (register_to_mean_first is True):
-        # Rigid + scaling alginment of the original mesh to the mean mesh
+        # Rigid + scaling (similarity) alginment of the original mesh to the mean mesh
         # of the model. This allows all downstream scaling to occur as expected
         # it also aligns the new bone with the mean/expected bone of the shape model
         # to maximize fidelity of the reconstruction.
 
         if mean_mesh is None:
-            raise Exception('Must provide mean mesh to register to')
+            raise ValueError('Must provide mean mesh to register to')
         icp_transform = orig_meshes[mesh_to_scale].rigidly_register(
             other_mesh=mean_mesh,
             as_source=True,
@@ -363,7 +372,7 @@ def read_meshes_get_sampled_pts(
             return_transform=True,
         )
         results['icp_transform'] = icp_transform
-        
+
         # apply transform to all other meshes
         for idx, new_mesh in enumerate(new_meshes):
             new_mesh.apply_transform_to_mesh(icp_transform)
@@ -383,14 +392,14 @@ def read_meshes_get_sampled_pts(
                 # for centering as they are for caling (pts_)
                 pts_center = new_pts[mesh_to_scale]
         else:
+            pts_ = new_pts[mesh_to_scale]
             if center_all_meshes is True:
-                # set specific points to center becuase scale/center are not on
+                # set specific points to center because scale/center are not on
                 # the same data
                 pts_center = np.concatenate(new_pts, axis=0)
             else:
                 # Set as None - becuasse scaling and centering on same data
                 pts_center = None
-            pts_ = new_pts[mesh_to_scale]
 
         center, scale = get_pts_center_and_scale(
             np.copy(pts_),
@@ -404,7 +413,7 @@ def read_meshes_get_sampled_pts(
         for pts_idx, new_pts_ in enumerate(new_pts):
             new_pts[pts_idx] = (new_pts_ - center)/scale
     else:
-        # Do nothing to the points because they are left the same. 
+        # Do nothing to the points because they are left the same.
         scale = 1
         center = np.zeros(3)
     
@@ -451,9 +460,7 @@ def read_meshes_get_sampled_pts(
         # meshes.
         for mesh_idx, new_mesh in enumerate(new_meshes):
             sdfs_ = []
-            
-            if verbose is True:
-                print('pts_idx, new_pts_ shape', pts_idx, new_pts_.shape)
+
             for pts_idx, new_pts_ in enumerate(new_pts):
                 if verbose is True:
                     print('mesh_idx, new_mesh point_coords shape', mesh_idx, new_mesh.point_coords.shape)
@@ -470,7 +477,7 @@ def read_meshes_get_sampled_pts(
                     sdfs_.append(_sdfs_)
 
             sdfs.append(np.concatenate(sdfs_, axis=0))       
-        
+
         pts_surface = []
         for pts_idx, new_pts_ in enumerate(new_pts):
             pts_surface.append([pts_idx] * new_pts_.shape[0])
@@ -478,12 +485,12 @@ def read_meshes_get_sampled_pts(
 
         new_pts = np.concatenate(new_pts, axis=0)
 
-        
+
 
         results['pts'] = new_pts
         results['sdf'] = sdfs
         results['pts_surface'] = pts_surface
-    
+
     results['scale'] = scale
     results['center'] = center
 
@@ -493,12 +500,7 @@ def read_meshes_get_sampled_pts(
         results['orig_pts'] = orig_pts
     if return_new_mesh is True:
         results['new_mesh'] = new_meshes
-    
-    if ('return_scale' in kwargs):
-        print('return_scale is deprecated and not used in this function - always returns scale')
-    if ('return_center' in kwargs):
-        print('return_center is deprecated and not used in this function - always returns center')
-    
+
     return results
 
 
