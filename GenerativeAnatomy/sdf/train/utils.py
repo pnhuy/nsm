@@ -28,7 +28,7 @@ def cyclic_anneal_linear(
     n_epochs,
     min_=0,
     max_=1,
-    ratio=0.5,
+    ratio=0.5, # ratio of the cycle to be increasing; 1-ratio is plateaued @ max_
     n_cycles=5
 ):
     """
