@@ -327,7 +327,7 @@ def train_epoch(
                 else:
                     raise ValueError('Unknown code regularization type prior: {}'.format(config['code_regularization_type_prior']))
                 reg_loss = (
-                    config['code_regularization_weight'] * min(1, epoch/100) * l2_size_loss
+                    config['code_regularization_weight'] * min(1, epoch/config['code_regularization_warmup']) * l2_size_loss
                 ) / num_sdf_samples
 
                 if config['code_cyclic_anneal'] is True:
