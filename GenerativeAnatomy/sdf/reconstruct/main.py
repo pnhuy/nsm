@@ -5,6 +5,8 @@ from .utils import (
     adjust_learning_rate
 )
 
+from .predictive_validation_class import Regress
+
 from GenerativeAnatomy.sdf.datasets import (
     read_mesh_get_sampled_pts, 
     get_pts_center_and_scale,
@@ -356,6 +358,7 @@ def reconstruct_mesh(
     n_samples_latent_recon=10000,
     difficulty_weight_recon=None,
     chamfer_norm=2,
+    func=None,
 ):
     """
     Reconstructs mesh at path using decoders. 
@@ -469,7 +472,7 @@ def reconstruct_mesh(
             mesh_to_scale=mesh_to_scale,
             scale_method=scale_method,
             get_random=get_rand_pts,
-            return_orig_mesh=True if (calc_symmetric_chamfer & return_unscaled) else False, # if want to calc, then need orig mesh
+            return_orig_mesh=True if ((func is not None) or (calc_symmetric_chamfer & return_unscaled)) else False, # if want to calc, then need orig mesh
             return_new_mesh=True if (calc_symmetric_chamfer & (return_unscaled==False)) else False,
             return_orig_pts=True if (calc_symmetric_chamfer & return_unscaled) else False,
             register_to_mean_first=True if register_similarity else False,
@@ -659,13 +662,16 @@ def reconstruct_mesh(
                     emd_loss.append(emd_loss_.item())
         elif __emd__ is False:
             raise ImportError('Cannot calculate EMD without emd module')
+    
+    if func is not None:
+        func_results = func(orig_mesh=result_['orig_mesh'], recon_meshes=meshes)
 
     toc = time.time()
     time_calc_metrics = toc - tic
     if verbose is True:
         print(f'Calculated metrics in {time_calc_metrics:.2f} seconds')
 
-    if calc_emd or calc_symmetric_chamfer or return_latent:
+    if calc_emd or calc_symmetric_chamfer or return_latent or (func is not None):
         result = {}
         if calc_symmetric_chamfer:
             for idx, chamfer_loss_ in enumerate(chamfer_loss):
@@ -675,6 +681,9 @@ def reconstruct_mesh(
                 result['emd_{idx}'] = emd_loss_
         if return_latent:
             result['latent'] = latent
+        
+        if func is not None:
+            result.update(func_results)      
 
         if log_wandb is True:
             wandb.log(result)
@@ -776,6 +785,8 @@ def get_mean_errors(
     n_samples_latent_recon=10000,
     difficulty_weight_recon=None,
     chamfer_norm=2,
+    recon_func=None,
+    predict_val_variables=None,
 ):
     """
     Reconstruct meshes & compute errors    
@@ -789,7 +800,7 @@ def get_mean_errors(
         'calc_emd':calc_emd,
         'register_similarity':register_similarity,
         'scale_all_meshes':scale_all_meshes,
-        'return_latent': False
+        'return_latent': True
     }
 
     if model_type == 'deepsdf':
@@ -821,6 +832,7 @@ def get_mean_errors(
             'n_samples_latent_recon': n_samples_latent_recon,
             'difficulty_weight_recon': difficulty_weight_recon,
             'chamfer_norm': chamfer_norm,
+            'func': recon_func,
         }
 
         recon_fx = reconstruct_mesh
@@ -836,6 +848,13 @@ def get_mean_errors(
         raise ValueError(f'model_type must be either "deepsdf" or "diffusion"m received {model_type}')
 
     reconstruct_inputs.update(reconstruct_inputs_)
+
+    if predict_val_variables is not None:
+        reg = Regress(
+            list_factors=predict_val_variables, 
+            list_paths=mesh_paths
+        )
+        
 
     for idx, mesh_path in enumerate(mesh_paths):
         if log_wandb is True:
@@ -857,6 +876,10 @@ def get_mean_errors(
         )
         if verbose is True:
             print('result_', result_)
+
+        if predict_val_variables is not None:
+            reg.add_latent(result_)
+
         for mesh_idx in range(len(result_['mesh'])):
             if calc_symmetric_chamfer:
                 if idx == 0:
@@ -866,12 +889,26 @@ def get_mean_errors(
                 if idx == 0:
                     loss[f'emd_{mesh_idx}'] = []
                 loss[f'emd_{mesh_idx}'].append(result_[f'emd_{mesh_idx}'])
+        
+        # if a function was given - append its results. 
+        if (recon_func is not None):
+            for key, val in result_.items():
+                if 'func_' == key[:5]:
+                    if idx == 0:
+                        loss[key[5:]] = []
+                    loss[key[5:]].append(val)
 
         if log_wandb is True:
             wandb.finish()
+
     if verbose is True:
         print('loss', loss)
     loss_ = {}
+
+    if predict_val_variables is not None:
+        predictive_results = reg.calc_r2()
+        loss_.update(predictive_results)
+        
     for key, item in loss.items():
         mean = np.mean(item)
         std = np.std(item)
@@ -884,4 +921,3 @@ def get_mean_errors(
         loss_[f'{key}_hist'] = hist
 
     return loss_
-

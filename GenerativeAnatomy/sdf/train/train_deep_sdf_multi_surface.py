@@ -7,7 +7,7 @@ from GenerativeAnatomy.sdf.sdf_utils import (
     get_latent_vecs,
     get_checkpoints,
 )
-from GenerativeAnatomy.sdf.reconstruct import get_mean_errors
+from GenerativeAnatomy.sdf.reconstruct import get_mean_errors, compare_cart_thickness
 
 from GenerativeAnatomy.sdf.train.utils import (
     get_kld,
@@ -23,6 +23,12 @@ import os
 import torch 
 import time
 import numpy as np
+
+
+DICT_VALIDATION_FUNCS = {
+    'compare_cart_thickness': compare_cart_thickness,
+    None: None
+}
 
 loss_l1 = torch.nn.L1Loss(reduction='none')
 
@@ -118,7 +124,9 @@ def train_deep_sdf(
                         n_samples_latent_recon=config['n_samples_latent_recon'], 
                         # difficulty_weight_recon
                         # chamfer_norm
-                        scale_all_meshes=True,                                           
+                        scale_all_meshes=True,
+                        recon_func=None if (('recon_val_func_name' not in config)) else DICT_VALIDATION_FUNCS[config['recon_val_func_name']],
+                        predict_val_variables=None if ('predict_val_variables' not in config) else config['predict_val_variables'],
                     )
 
                     log_dict.update(dict_loss)
