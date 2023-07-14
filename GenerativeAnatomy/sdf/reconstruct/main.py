@@ -5,6 +5,8 @@ from .utils import (
     adjust_learning_rate
 )
 
+from .recon_evaluation import compute_recon_loss
+
 from .predictive_validation_class import Regress
 
 from GenerativeAnatomy.sdf.datasets import (
@@ -220,7 +222,7 @@ def reconstruct_latent(
                         # if only one surface - then just loss_fn (l1/l2) between pred_sdf and sdf_gt
                         if difficulty_weight is not None:
                             raise NotImplementedError
-                        _loss_ += loss_fn(pred_sdf, sdf_gt_[decoder_idx][current_pt_idx:current_pt_idx + current_batch_size, ...]) * loss_weight
+                        _loss_ += loss_fn(pred_sdf.squeeze(), sdf_gt_[decoder_idx][current_pt_idx:current_pt_idx + current_batch_size, ...].squeeze()) * loss_weight
                         
                     else:
                         # if multiple surfaces - then compute loss for each surface and weight them
@@ -334,6 +336,7 @@ def reconstruct_mesh(
     n_lr_updates=2,
     lr_update_factor=10,
     calc_symmetric_chamfer=False,
+    calc_assd=False,
     calc_emd=False,
     return_unscaled=True,
     n_pts_per_axis=256,
@@ -399,6 +402,7 @@ def reconstruct_mesh(
 
     if (fit_similarity is True) and (register_similarity is True):
         raise ValueError('Cannot fit similarity and register similarity at the same time')
+    
     if register_similarity is True:
         # if register first, then register new mesh to the mean of the decoder (zero latent vector)
         # create mean mesh of only mesh, or "mesh_to_scale" if more than one.
@@ -426,6 +430,9 @@ def reconstruct_mesh(
             if calc_symmetric_chamfer:
                 for idx in range(sum(objects_per_decoder)):
                     result[f'chamfer_{idx}'] = np.nan
+            if calc_assd:
+                for idx in range(sum(objects_per_decoder)):
+                    result[f'assd_{idx}'] = np.nan
             if calc_emd:
                 for idx in range(sum(objects_per_decoder)):
                     result['emd_{idx}'] = np.nan
@@ -619,66 +626,36 @@ def reconstruct_mesh(
     if verbose is True:
         print(f'Created mesh in {time_create_mesh:.2f} seconds')
     tic = time.time()
-
-    # calculate loss metrics/surface error metrics.
-    if calc_symmetric_chamfer or calc_emd:
-        pts_recon = []
-        xyz_orig = []
-        for mesh_idx, mesh in enumerate(meshes):
-            if mesh is not None:
-                pts_recon.append(mesh.point_coords)
-            else:
-                pts_recon.append(None)
-
-            xyz_orig_ = result_['orig_pts'][mesh_idx]
-            xyz_orig.append(xyz_orig_)
-
-    if calc_symmetric_chamfer:
-        if __chamfer__ is True:
-            chamfer_loss = []
-            for pts_idx in range(len(meshes)):
-                if pts_recon[pts_idx] is None:
-                    chamfer_loss.append(np.nan)
-                else:
-                    chamfer_loss_ = compute_chamfer(
-                        xyz_orig[pts_idx],
-                        pts_recon[pts_idx],
-                        num_samples=n_samples_chamfer,
-                        power=chamfer_norm
-                    )
-                    chamfer_loss.append(chamfer_loss_)
-
-        elif __chamfer__ is False:
-            raise ImportError('Cannot calculate symmetric chamfer distance without chamfer_pytorch module')
-
-    if calc_emd:
-        if __emd__ is True:
-            emd_loss = []
-            for pts_idx in range(len(meshes)):
-                if pts_recon[pts_idx] is None:
-                    emd_loss.append(np.nan)
-                else:
-                    emd_loss_, _, _ = sinkhorn(xyz_orig[pts_idx], pts_recon[pts_idx])
-                    emd_loss.append(emd_loss_.item())
-        elif __emd__ is False:
-            raise ImportError('Cannot calculate EMD without emd module')
     
     if func is not None:
         func_results = func(orig_mesh=result_['orig_mesh'], recon_meshes=meshes)
 
     toc = time.time()
-    time_calc_metrics = toc - tic
+    time_calc_recon_funcs = toc - tic
     if verbose is True:
-        print(f'Calculated metrics in {time_calc_metrics:.2f} seconds')
+        print(f'metrics in {time_calc_recon_funcs:.2f} seconds')
+    tic = time.time()
 
-    if calc_emd or calc_symmetric_chamfer or return_latent or (func is not None):
-        result = {}
-        if calc_symmetric_chamfer:
-            for idx, chamfer_loss_ in enumerate(chamfer_loss):
-                result[f'chamfer_{idx}'] = chamfer_loss_
-        if calc_emd:
-            for idx, emd_loss_ in enumerate(emd_loss):
-                result['emd_{idx}'] = emd_loss_
+    if calc_emd or calc_symmetric_chamfer or calc_assd or return_latent or (func is not None):
+        result = {'mesh': meshes}
+
+        if calc_emd or calc_symmetric_chamfer:
+            result_ = compute_recon_loss(
+                meshes=meshes,
+                orig_pts=result_['orig_pts'],
+                n_samples_chamfer=n_samples_chamfer,
+                chamfer_norm=chamfer_norm,
+                calc_symmetric_chamfer=calc_symmetric_chamfer,
+                calc_assd=calc_assd,
+                calc_emd=calc_emd,
+            )
+            toc = time.time()
+            time_calc_recon_loss = toc - tic
+            if verbose is True:
+                print(f'metrics in {time_calc_recon_loss:.2f} seconds')
+
+            result.update(result_)
+
         if return_latent:
             result['latent'] = latent
         
@@ -688,7 +665,7 @@ def reconstruct_mesh(
         if log_wandb is True:
             wandb.log(result)
         
-        result['mesh'] = meshes
+        
 
         return result
     else:
@@ -752,6 +729,7 @@ def get_mean_errors(
     decoders,
     latent_size,
     calc_symmetric_chamfer=False,
+    calc_assd=False,
     calc_emd=False,
     log_wandb=False,
     num_iterations=1000,
@@ -797,6 +775,7 @@ def get_mean_errors(
     reconstruct_inputs = {
         'latent_size':latent_size,
         'calc_symmetric_chamfer':calc_symmetric_chamfer,
+        'calc_assd':calc_assd,
         'calc_emd':calc_emd,
         'register_similarity':register_similarity,
         'scale_all_meshes':scale_all_meshes,
