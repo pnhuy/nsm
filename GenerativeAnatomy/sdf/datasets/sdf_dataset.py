@@ -241,9 +241,12 @@ def read_mesh_get_sampled_pts(
 
         results['xyz'] = rand_pts
         results['gt_sdf'] = rand_sdf
+        results['pts_surface'] = [0] * rand_pts.shape[0]
     else:
         results['pts'] = new_pts
         results['sdf'] = np.zeros(new_pts.shape[0])
+        results['pts_surface'] = [0] * new_pts.shape[0]
+        
     
     if return_point_cloud is True:
         results['point_cloud'] = new_pts
@@ -253,11 +256,11 @@ def read_mesh_get_sampled_pts(
     results['center'] = center
 
     if return_orig_mesh is True:
-        results['orig_mesh'] = orig_mesh
+        results['orig_mesh'] = [orig_mesh]
     if return_orig_pts is True:
-        results['orig_pts'] = orig_pts
+        results['orig_pts'] = [orig_pts]
     if return_new_mesh is True:
-        results['new_mesh'] = new_mesh
+        results['new_mesh'] = [new_mesh]
     
     if ('return_scale' in kwargs):
         print('return_scale is deprecated and not used in this function - always returns scale')
