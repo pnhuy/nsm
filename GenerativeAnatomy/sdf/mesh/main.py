@@ -271,7 +271,7 @@ def get_sdfs(decoder, samples, latent_vector, batch_size=32**3, objects=1):
         sampled_pts = samples[current_idx : current_idx + current_batch_size, :3].cuda()
         sdf_values[current_idx : current_idx + current_batch_size, :] = decode_sdf(
             decoder, latent_vector, sampled_pts
-        ).squeeze(1).detach().cpu()
+        ).detach().cpu()
 
         current_idx += current_batch_size
     # sdf_values.squeeze(1)

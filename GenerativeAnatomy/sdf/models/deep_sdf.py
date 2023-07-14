@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch
 import torch.nn.functional as F
 import numpy as np
+import warnings
 
 PROGRESSIVE_PARAMS = {
     'n_layers': 3,
@@ -38,7 +39,6 @@ class Decoder(nn.Module):
         dropout=None,
         dropout_prob=0.2,
         norm_layers=(), # DEPRECATED
-        latent_dropout=False, # DEPRECATED
         latent_in=(),
         weight_norm=True,
         # batch_norm=False,
@@ -48,7 +48,8 @@ class Decoder(nn.Module):
         concat_latent_input=False,
         progressive_add_depth=False,
         progressive_depth_params=PROGRESSIVE_PARAMS,
-
+        latent_noise_sigma=None,
+        **kwargs
     ):
         """
         latent_size (int): size of the latent input vector to the decoder network
@@ -61,9 +62,11 @@ class Decoder(nn.Module):
         weight_norm (bool): whether to apply weight normalization
         xyz_in_all (bool): for deepSDF decoder, include XYZ at each layer
         use_tanh (bool): for deepSDF decoder, tanh final layer to [0, 1]
-        latent_dropout (bool): for deepSDF decoder, run dropout on input latent vector
         """
         super(Decoder, self).__init__()
+
+        if 'latent_dropout' in kwargs:
+            warnings.warn("latent_dropout is deprecated. Use dropout instead.", DeprecationWarning)
 
         #DEPRECATED
         self.norm_layers = norm_layers
@@ -78,6 +81,7 @@ class Decoder(nn.Module):
         self.latent_in = latent_in
         self.progressive_add_depth = progressive_add_depth
         self.progressive_depth_params = progressive_depth_params
+        self.latent_noise_sigma = latent_noise_sigma
 
         #layers:
         # 0: input
@@ -87,10 +91,6 @@ class Decoder(nn.Module):
             self.dims = self.dims + [1]
         else:
             self.dims = self.dims + [n_objects]        
-
-        # self.xyz_in_all = xyz_in_all
-        # self.weight_norm = weight_norm
-        # self.activation = activation
 
         self.layers = nn.ModuleList()
         self.bn = nn.ModuleList()
@@ -113,67 +113,11 @@ class Decoder(nn.Module):
         
         self.activation = get_activation(self._activation_)
         self.final_activation = get_activation(self._final_activation_)
-        # # Add final activation
-        # if final_activation != "linear":
-        #     self.layers.append(get_activation(self._final_activation_))
 
         self.dropout_prob = dropout_prob
         self.dropout = dropout
         self.epoch = None
-            
-            # if self.xyz_in_all and layer != self.num_layers - 2:
-            #     #TODO: Should this also include logic for
-            #     # concat_latent_input? - right now it assumes not concat
-            #     out_dim -= 3
 
-            # lin = nn.Linear(in_dim, out_dim)
-
-            # be sure to specially initialize layer weights 
-            # for the sine activation based network (Siren). 
-            # if activation == 'sin':
-            #     with torch.no_grad():
-            #         num_input = lin.weight.size(-1)
-            #         if layer == 0:
-            #             torch.nn.init.uniform_(lin.weight, -1 / num_input, 1 / num_input)
-            #         else:
-            #             torch.nn.init.uniform_(lin.weight, -np.sqrt(6 / num_input) / 30, np.sqrt(6 / num_input) / 30)
-
-            # if weight_norm and layer in self.norm_layers:
-            #     setattr(
-            #         self,
-            #         "lin" + str(layer),
-            #         nn.utils.weight_norm(lin),
-            #     )
-            # else:
-            #     setattr(self, "lin" + str(layer), lin)
-            # if (
-            #     (not weight_norm)
-            #     and self.norm_layers is not None
-            #     and layer in self.norm_layers
-            # ):
-            #     setattr(self, "bn" + str(layer), nn.LayerNorm(out_dim))
-        
-        # # SETUP ACTIVATION
-        # if activation == "relu":
-        #     self.activation = nn.ReLU()
-        # elif activation == "sin":
-        #     self.activation = Sine()
-        
-
-       
-
-        # # SETUP FINAL ACTIVATION
-        # if final_activation == "sin":
-        #     self.final_activation = Sine()
-        # elif final_activation == "tanh":
-        #     self.final_activation = nn.Tanh()
-        # elif final_activation == "linear":
-        #     self.final_activation = None
-        # else:
-        #     raise ValueError("Invalid final activation")
-        
-
-        
 
     def get_layer_dims(self, layer):
         if self.concat_latent_input == False:
