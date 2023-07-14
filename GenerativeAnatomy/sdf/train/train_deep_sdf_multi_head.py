@@ -89,6 +89,7 @@ def train_deep_sdf(
                     decoders=models,
                     latent_size=config['latent_size'],
                     calc_symmetric_chamfer=config['chamfer'],
+                    calc_assd=config['assd'],
                     calc_emd=config['emd'],
                     register_similarity=True,
                     scale_all_meshes=True,

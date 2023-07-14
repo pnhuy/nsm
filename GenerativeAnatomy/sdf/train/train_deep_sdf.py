@@ -57,9 +57,11 @@ def train_deep_sdf(
         shuffle=True,
         num_workers=config['num_data_loader_threads'],
         drop_last=False,
+        prefetch_factor=config['prefetch_factor'],
+        pin_memory=True 
     )
 
-    latent_vecs = get_latent_vecs(len(data_loader.dataset), config)
+    latent_vecs = get_latent_vecs(len(data_loader.dataset), config).cuda()
 
     optimizer = get_optimizer(model, latent_vecs, lr_schedules=config['lr_schedules'], optimizer=config["optimizer"], weight_decay=config["weight_decay"])
 
@@ -85,29 +87,34 @@ def train_deep_sdf(
 
                 dict_loss = get_mean_errors(
                     mesh_paths=config['val_paths'],
+                    decoders=model,
                     num_iterations=config['num_iterations_recon'],
-                    decoder=model,
+                    register_similarity=True,
                     latent_size=config['latent_size'],
-                    calc_symmetric_chamfer=config['chamfer'],
-                    calc_emd=config['emd'],
-                    verbose=config['verbose'],
-                    get_rand_pts=config['get_rand_pts_recon'],
-                    n_pts_random=config['n_pts_random_recon'],
                     lr=config['lr_recon'],
                     l2reg=config['l2reg_recon'],
                     clamp_dist=config['clamp_dist_recon'],
                     n_lr_updates=config['n_lr_updates_recon'],
                     lr_update_factor=config['lr_update_factor_recon'],
-                    convergence_patience=config['convergence_patience_recon'],
-                    batch_size_latent_recon=config['batch_size_latent_recon'],
+                    calc_symmetric_chamfer=config['chamfer'],
+                    calc_assd=config['assd'],
+                    calc_emd=config['emd'],
                     convergence=config['convergence_type_recon'],
+                    convergence_patience=config['convergence_patience_recon'],
+                    verbose=config['verbose'],
+                    objects_per_decoder=1,
+                    batch_size_latent_recon=config['batch_size_latent_recon'],
+                    get_rand_pts=config['get_rand_pts_recon'],
+                    n_pts_random=config['n_pts_random_recon'],
                     sigma_rand_pts=config['sigma_rand_pts_recon'],
-                    n_samples_latent_recon=config['n_samples_latent_recon'], 
+                    n_samples_latent_recon=config['n_samples_latent_recon'],
+                    # recon_func=None if (('recon_val_func_name' not in config)) else DICT_VALIDATION_FUNCS[config['recon_val_func_name']],
+                    # predict_val_variables=None if ('predict_val_variables' not in config) else config['predict_val_variables'],
                 )
 
                 log_dict.update(dict_loss)
 
-        if use_wandb is True:                    
+        if use_wandb is True:
             wandb.log(log_dict)
         
     return loss
@@ -142,13 +149,17 @@ def train_epoch(
         
         # sdf_data = sdf_data.reshape(-1, 4)
 
-        xyz = sdf_data['xyz']
+        xyz = sdf_data['xyz'].cuda()
         xyz = xyz.reshape(-1, 3)
-        sdf_gt = sdf_data['gt_sdf']
-        sdf_gt = sdf_gt.reshape(-1, 1)
 
         num_sdf_samples = xyz.shape[0]
         xyz.requires_grad = False
+
+        indices = indices.cuda()
+
+        sdf_gt = sdf_data['gt_sdf']
+        sdf_gt = sdf_gt.reshape(-1, 1)
+
         sdf_gt.requires_grad = False
 
         if config['enforce_minmax'] is True:
@@ -173,14 +184,14 @@ def train_epoch(
 
             batch_vecs = latent_vecs(indices[split_idx])
             inputs = torch.cat([batch_vecs, xyz[split_idx]], dim=1)
-            inputs = inputs.to(config['device'])
+            # inputs = inputs.to(config['device'])
 
-            pred_sdf = model(inputs)
+            pred_sdf = model(inputs, epoch=epoch)
 
             if config['enforce_minmax'] is True:
                 pred_sdf = torch.clamp(pred_sdf, -config['clamp_dist'], config['clamp_dist'])
             
-            l1_loss = loss_l1(pred_sdf, sdf_gt[split_idx].cuda()) 
+            l1_loss = loss_l1(pred_sdf, sdf_gt[split_idx].cuda())
             
             # curriculum SDF equation 5
             # progressively fine-tune the regions of surface cared about by the network. 
@@ -190,8 +201,6 @@ def train_epoch(
                     l1_loss - (weight_schedule * config['surface_accuracy_e']),
                     torch.zeros_like(l1_loss)
                 )
-
-            l1_loss = l1_loss / num_sdf_samples
             
             # curriculum SDF equation 6
             # progressively fine-tune the regions of surface cared about by the network.
@@ -209,6 +218,7 @@ def train_epoch(
                 difficulty_weight = difficulty_weight * weight_schedule
                 l1_loss = l1_loss * difficulty_weight
             
+            l1_loss = l1_loss / num_sdf_samples
             
             l1_loss = l1_loss.sum()
             
@@ -231,7 +241,7 @@ def train_epoch(
                 else:
                     raise ValueError('Unknown code regularization type prior: {}'.format(config['code_regularization_type_prior']))
                 reg_loss = (
-                    config['code_regularization_weight'] * min(1, epoch/100) * l2_size_loss
+                    config['code_regularization_weight'] * min(1, epoch/config['code_regularization_warmup']) * l2_size_loss
                 ) / num_sdf_samples
 
                 if config['code_cyclic_anneal'] is True:
