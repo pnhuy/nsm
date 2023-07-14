@@ -136,7 +136,14 @@ def get_checkpoints(config):
     return checkpoints
 
 def get_latent_vecs(num_objects, config):
-    lat_vecs = torch.nn.Embedding(num_objects, config['latent_size'], max_norm=config['latent_bound'])
+    if ('variational' in config) and (config['variational'] is True):
+        latent_size = config['latent_size'] * 2
+        latent_bound = 1000
+    else:
+        latent_size = config['latent_size']
+        latent_bound = config['latent_bound']
+
+    lat_vecs = torch.nn.Embedding(num_objects, latent_size, max_norm=latent_bound)
     torch.nn.init.normal_(
         lat_vecs.weight.data,
         0.0,

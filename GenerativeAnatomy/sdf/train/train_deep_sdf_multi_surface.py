@@ -111,6 +111,7 @@ def train_deep_sdf(
                         n_lr_updates=config['n_lr_updates_recon'],
                         lr_update_factor=config['lr_update_factor_recon'],
                         calc_symmetric_chamfer=config['chamfer'],
+                        calc_assd=config['assd'],
                         calc_emd=config['emd'],
                         convergence=config['convergence_type_recon'],
                         convergence_patience=config['convergence_patience_recon'],
@@ -164,6 +165,7 @@ def train_epoch(
         # if config['code_regularization_type_prior'] == 'kld_diagonal':
         #     kld_loss = get_kld(latent_vecs)
 
+
     for sdf_data, indices in data_loader:
         if config['verbose'] is True:
             print('sdf index size:', indices.size())
@@ -176,8 +178,7 @@ def train_epoch(
         num_sdf_samples = xyz.shape[0]
         xyz.requires_grad = False
 
-        indices = indices.cuda()
-        
+        indices = indices.cuda()        
         
         sdf_gt = []
         for surf_idx in range(n_surfaces):
@@ -214,8 +215,15 @@ def train_epoch(
         for split_idx in range(config['batch_split']):
             if config['verbose'] is True:
                 print('Split idx: ', split_idx)
-
+            
             batch_vecs = latent_vecs(indices[split_idx])
+            if 'variational' in config and config['variational'] is True:
+                mu = batch_vecs[:, :config['latent_size']]
+                logvar = batch_vecs[:, config['latent_size']:]
+                std = torch.exp(0.5 * logvar)
+                err = torch.randn_like(std)
+                batch_vecs = std * err + mu
+
             inputs = torch.cat([batch_vecs, xyz[split_idx]], dim=1)
             # inputs = inputs.to(config['device'])
 
@@ -320,23 +328,30 @@ def train_epoch(
             chunk_loss = l1_loss
 
             if config['code_regularization'] is True:
-                if config['code_regularization_type_prior'] == 'spherical':
-                    # spherical prior
-                    # all latent vectors should have the same unit length
-                    # therefore, the latent dimensions will be correlated
-                    # with one another - this is as opposed to PCA (and below). 
-                    l2_size_loss = torch.sum(torch.norm(batch_vecs, dim=1))
-                elif config['code_regularization_type_prior'] == 'identity':
-                    # independently penalize each dimension/value of latent code
-                    # therefore latent code ends up having identity covariance matrix
-                    l2_size_loss = torch.sum(torch.square(batch_vecs))
-                elif config['code_regularization_type_prior'] == 'kld_diagonal':
-                    l2_size_loss = get_kld(batch_vecs)
+                if 'variational' in config and config['variational'] is True:
+                    kld = torch.mean(-0.5 * torch.sum(1 + logvar - mu ** 2 - logvar.exp(), dim = 1), dim = 0)
+                    reg_loss = kld
+                    code_reg_norm = 1
                 else:
-                    raise ValueError('Unknown code regularization type prior: {}'.format(config['code_regularization_type_prior']))
+                    if config['code_regularization_type_prior'] == 'spherical':
+                        # spherical prior
+                        # all latent vectors should have the same unit length
+                        # therefore, the latent dimensions will be correlated
+                        # with one another - this is as opposed to PCA (and below). 
+                        reg_loss = torch.sum(torch.norm(batch_vecs, dim=1))
+                    elif config['code_regularization_type_prior'] == 'identity':
+                        # independently penalize each dimension/value of latent code
+                        # therefore latent code ends up having identity covariance matrix
+                        reg_loss = torch.sum(torch.square(batch_vecs))
+                    elif config['code_regularization_type_prior'] == 'kld_diagonal':
+                        reg_loss = get_kld(batch_vecs)
+                    else:
+                        raise ValueError(f'Unknown code regularization type prior: {config["code_regularization_type_prior"]}')
+                    code_reg_norm = num_sdf_samples
+
                 reg_loss = (
-                    config['code_regularization_weight'] * min(1, epoch/config['code_regularization_warmup']) * l2_size_loss
-                ) / num_sdf_samples
+                    config['code_regularization_weight'] * min(1, epoch/config['code_regularization_warmup']) * reg_loss
+                ) / code_reg_norm
 
                 if config['code_cyclic_anneal'] is True:
                     anneal_weight = cyclic_anneal_linear(epoch=epoch, n_epochs=config['n_epochs'])
@@ -383,6 +398,14 @@ def train_epoch(
     }
     for l1_idx, l1_loss_ in enumerate(save_l1_losses):
         log_dict['l1_loss_{}'.format(l1_idx)] = l1_loss_
+
+    if config['log_latent'] is not None:
+        vecs = latent_vecs.weight.data.cpu().numpy()
+        for latent_idx in range(config['log_latent']):
+            log_dict[f'latent_{latent_idx}'] = wandb.Histogram(vecs[:, latent_idx])
+            log_dict[f'latent_{latent_idx}_mean'] = vecs[:, latent_idx].mean()
+            log_dict[f'latent_{latent_idx}_std'] = vecs[:, latent_idx].std()
+
 
     return log_dict
 
