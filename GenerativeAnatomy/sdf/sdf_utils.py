@@ -37,6 +37,14 @@ class WarmupLearningRateSchedule(LearningRateSchedule):
             return self.warmed_up
         return self.initial + (self.warmed_up - self.initial) * epoch / self.length
 
+class LogAnnealLearningRateSchedule(LearningRateSchedule):
+    def __init__(self, initial, final, n_epochs):
+        self.initial = initial
+        self.final = final
+        self.n_epochs = n_epochs
+
+    def get_learning_rate(self, epoch):
+        return self.initial * math.exp(math.log(self.final / self.initial) * epoch / self.n_epochs)
 
 def get_learning_rate_schedules(config):
 
@@ -44,31 +52,38 @@ def get_learning_rate_schedules(config):
 
     schedules = []
 
-    for schedule_specs in schedule_specs:
+    for schedule_spec in schedule_specs:
 
-        if schedule_specs["Type"] == "Step":
+        if schedule_spec["Type"] == "Step":
             schedules.append(
                 StepLearningRateSchedule(
-                    schedule_specs["Initial"],
-                    schedule_specs["Interval"],
-                    schedule_specs["Factor"],
+                    schedule_spec["Initial"],
+                    schedule_spec["Interval"],
+                    schedule_spec["Factor"],
                 )
             )
-        elif schedule_specs["Type"] == "Warmup":
+        elif schedule_spec["Type"] == "Warmup":
             schedules.append(
                 WarmupLearningRateSchedule(
-                    schedule_specs["Initial"],
-                    schedule_specs["Final"],
-                    schedule_specs["Length"],
+                    schedule_spec["Initial"],
+                    schedule_spec["Final"],
+                    schedule_spec["Length"],
                 )
             )
-        elif schedule_specs["Type"] == "Constant":
-            schedules.append(ConstantLearningRateSchedule(schedule_specs["Value"]))
+        elif schedule_spec["Type"] == "Constant":
+            schedules.append(ConstantLearningRateSchedule(schedule_spec["Value"]))
+        
+        elif schedule_spec["Type"] == "LogAnneal":
+            schedules.append(LogAnnealLearningRateSchedule(
+                schedule_spec["Initial"],
+                schedule_spec["Final"],
+                config["n_epochs"],
+            ))
 
         else:
-            raise Exception(
+            raise ValueError(
                 'no known learning rate schedule of type "{}"'.format(
-                    schedule_specs["Type"]
+                    schedule_spec["Type"]
                 )
             )
 
