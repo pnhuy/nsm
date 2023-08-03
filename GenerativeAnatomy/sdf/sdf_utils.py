@@ -6,14 +6,12 @@ class LearningRateSchedule:
     def get_learning_rate(self, epoch):
         pass
 
-
 class ConstantLearningRateSchedule(LearningRateSchedule):
     def __init__(self, value):
         self.value = value
 
     def get_learning_rate(self, epoch):
         return self.value
-
 
 class StepLearningRateSchedule(LearningRateSchedule):
     def __init__(self, initial, interval, factor):
@@ -24,7 +22,6 @@ class StepLearningRateSchedule(LearningRateSchedule):
     def get_learning_rate(self, epoch):
 
         return self.initial * (self.factor ** (epoch // self.interval))
-
 
 class WarmupLearningRateSchedule(LearningRateSchedule):
     def __init__(self, initial, warmed_up, length):
@@ -96,11 +93,6 @@ def adjust_learning_rate(lr_schedules, optimizer, epoch, verbose=False):
     for i, param_group in enumerate(optimizer.param_groups):
         param_group["lr"] = lr_schedules[i].get_learning_rate(epoch)
 
-# def save_checkpoints(epoch, config, model, epoch):
-#         save_model(config['experiment_directory'], str(epoch) + ".pth", decoder, epoch)
-#         save_optimizer(experiment_directory, str(epoch) + ".pth", optimizer_all, epoch)
-#         save_latent_vectors(experiment_directory, str(epoch) + ".pth", lat_vecs, epoch)
-
 def save_latent_vectors(config, epoch, latent_vec, latent_codes_subdir="latent_codes"):
     filename = f'{epoch}.pth'
     folder_save = os.path.join(config['experiment_directory'], latent_codes_subdir)
@@ -159,11 +151,13 @@ def get_latent_vecs(num_objects, config):
         latent_bound = config['latent_bound']
 
     lat_vecs = torch.nn.Embedding(num_objects, latent_size, max_norm=latent_bound)
-    torch.nn.init.normal_(
-        lat_vecs.weight.data,
-        0.0,
-        config['latent_init_std'] / math.sqrt(config['latent_size']),
-    )
+    
+    if ('latent_init_normal' in config) and (config['latent_init_normal'] is True):
+        torch.nn.init.normal_(
+            lat_vecs.weight.data,
+            0.0,
+            config['latent_init_std'] / math.sqrt(latent_size),
+        )
 
     return lat_vecs
 
@@ -191,7 +185,6 @@ def get_optimizer(model, latent_vecs, lr_schedules, optimizer="Adam", weight_dec
         optimizer = torch.optim.AdamW(list_params, weight_decay=weight_decay)
 
     return optimizer
-
 
 def symmetric_chammfer(p1, p2, n_pts):
     """
