@@ -10,8 +10,6 @@ import numpy as np
 import pymskt as mskt
 import vtk
 
-from GenerativeAnatomy.sdf.datasets import norm
-
 def scale_mesh_(mesh, scale=1.0, offset=(0., 0., 0.), icp_transform=None, verbose=False):
     if not issubclass(type(mesh), mskt.mesh.Mesh):
         mesh = mskt.mesh.Mesh(mesh)
@@ -58,7 +56,7 @@ def scale_mesh(
         old_pts -= offset
 
         if scale_method == 'max_rad':
-            scale = np.max(norm(old_pts), axis=-1)    
+            scale = np.max(np.linalg.norm(old_pts, axis=-1), axis=-1)
         else:
             raise NotImplementedError
     
