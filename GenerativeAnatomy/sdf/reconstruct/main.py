@@ -23,6 +23,7 @@ from .reconstruct_diffusion_sdf import reconstruct_mesh_diffusion_sdf
 import numpy as np
 import sys
 import os
+import copy
 import pymskt as mskt
 import wandb
 import time
@@ -639,7 +640,7 @@ def reconstruct_mesh(
     if calc_emd or calc_symmetric_chamfer or calc_assd or return_latent or (func is not None):
         result = {'mesh': meshes}
 
-        if calc_emd or calc_symmetric_chamfer:
+        if calc_emd or calc_symmetric_chamfer or calc_assd:
             result_ = compute_recon_loss(
                 meshes=meshes,
                 orig_pts=result_['orig_pts'],
@@ -663,9 +664,9 @@ def reconstruct_mesh(
             result.update(func_results)      
 
         if log_wandb is True:
-            wandb.log(result)
-        
-        
+            result_ = copy.copy(result)
+            del result_['mesh']
+            wandb.log(result_)
 
         return result
     else:
@@ -690,6 +691,7 @@ def tune_reconstruction(
         #     name=config['run_name'],
         #     tags=config['tags']
         # )
+
     
     dict_loss = get_mean_errors(
         mesh_paths=config['mesh_paths'],
@@ -708,6 +710,7 @@ def tune_reconstruction(
         n_lr_updates=config['n_lr_updates'],
         lr_update_factor=config['lr_update_factor'],
         calc_symmetric_chamfer=config['chamfer'],
+        calc_assd=config['assd'],
         calc_emd=config['emd'],
         convergence=config['convergence'],
         convergence_patience=config['convergence_patience'],
