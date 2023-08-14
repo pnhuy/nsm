@@ -346,6 +346,7 @@ def reconstruct_mesh(
     convergence='num_iterations',
     convergence_patience=50,
     fit_similarity=False,
+    scale_jointly=False,
     register_similarity=False,
     n_pts_per_axis_mean_mesh=128,
     scale_all_meshes=True, #whether when scaling a model it should be on all points in all meshes or not
@@ -404,7 +405,7 @@ def reconstruct_mesh(
     if (fit_similarity is True) and (register_similarity is True):
         raise ValueError('Cannot fit similarity and register similarity at the same time')
     
-    if register_similarity is True:
+    if (scale_jointly) or (register_similarity is True):
         # if register first, then register new mesh to the mean of the decoder (zero latent vector)
         # create mean mesh of only mesh, or "mesh_to_scale" if more than one.
         mean_latent = torch.zeros(1, latent_size)
@@ -455,15 +456,10 @@ def reconstruct_mesh(
         result_ = read_mesh_get_sampled_pts(
             path,
             sigma=sigma_rand_pts,
-            center_pts= not fit_similarity,
-            norm_pts= not fit_similarity,
+            center_pts= not scale_jointly,
+            norm_pts= not scale_jointly,
             scale_method=scale_method,
             get_random=get_rand_pts,
-            return_orig_mesh=True if (calc_symmetric_chamfer and return_unscaled) else False, # if want to calc, then need orig mesh
-            return_new_mesh=True if (calc_symmetric_chamfer and (return_unscaled==False)) else False,
-            return_orig_pts=True if (calc_symmetric_chamfer and return_unscaled) else False,
-            return_center=True, #return_unscaled,
-            return_scale=True, #return_unscaled,
             register_to_mean_first=True if register_similarity else False,
             mean_mesh=mean_mesh if register_similarity else None,
             n_pts_random=n_pts_random,
@@ -474,15 +470,12 @@ def reconstruct_mesh(
             paths=path,
             mean=[0,0,0],
             sigma=sigma_rand_pts,
-            center_pts= not fit_similarity,
-            norm_pts= not fit_similarity,
+            center_pts= not scale_jointly,
+            norm_pts= not scale_jointly,
             scale_all_meshes=scale_all_meshes,
             mesh_to_scale=mesh_to_scale,
             scale_method=scale_method,
             get_random=get_rand_pts,
-            return_orig_mesh=True if ((func is not None) or (calc_symmetric_chamfer & return_unscaled)) else False, # if want to calc, then need orig mesh
-            return_new_mesh=True if (calc_symmetric_chamfer & (return_unscaled==False)) else False,
-            return_orig_pts=True if (calc_symmetric_chamfer & return_unscaled) else False,
             register_to_mean_first=True if register_similarity else False,
             mean_mesh=mean_mesh,
             n_pts_random=n_pts_random,
@@ -768,6 +761,8 @@ def get_mean_errors(
     chamfer_norm=2,
     recon_func=None,
     predict_val_variables=None,
+
+    scale_jointly=False,
 ):
     """
     Reconstruct meshes & compute errors    
@@ -781,6 +776,7 @@ def get_mean_errors(
         'calc_assd':calc_assd,
         'calc_emd':calc_emd,
         'register_similarity':register_similarity,
+        'scale_jointly':scale_jointly,
         'scale_all_meshes':scale_all_meshes,
         'return_latent': True
     }

@@ -131,6 +131,8 @@ def train_deep_sdf(
                         scale_all_meshes=True,
                         recon_func=None if (('recon_val_func_name' not in config)) else DICT_VALIDATION_FUNCS[config['recon_val_func_name']],
                         predict_val_variables=None if ('predict_val_variables' not in config) else config['predict_val_variables'],
+
+                        scale_jointly=config['scale_jointly'],
                     )
 
                     log_dict.update(dict_loss)

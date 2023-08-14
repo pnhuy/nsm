@@ -7,6 +7,9 @@ import torch
 import hashlib
 from datetime import datetime
 import warnings
+import time
+import point_cloud_utils as pcu
+
 
 today_date = datetime.now().strftime("%b_%d_%Y")
 
@@ -49,7 +52,6 @@ def get_pts_rel_surface(pts, mean=[0,0,0], sigma=1, n_pts=200000, function='norm
         cov = np.identity(len(mean)) * sigma**2
         rand_pts = rand_gen(mean, cov, n_pts)
     elif function == 'laplace':
-
         rand_pts = np.tile(mean, [n_pts, 1])
         rand_pts = rand_gen(rand_pts, sigma, n_pts)
     
@@ -76,10 +78,10 @@ def get_rand_uniform_pts(n_pts, mins=(-1, -1, -1), maxs=(1, 1, 1)):
 
     return pts
 
-def get_sdfs(pts, mesh):
+def vtk_sdf(pts, mesh):
     """
     Calculates the signed distance functions (SDFs) for a set of points
-    given a mesh.
+    given a mesh using VTK.
 
     Args:
         pts (np.ndarray): (n_pts, 3) array of points
@@ -88,8 +90,6 @@ def get_sdfs(pts, mesh):
     Returns:
         np.ndarray: (n_pts, ) array of SDFs
     """
-    if issubclass(type(mesh), mskt.mesh.Mesh):
-        mesh = mesh.mesh
     implicit_distance = vtk.vtkImplicitPolyDataDistance()
     implicit_distance.SetInput(mesh)
     
@@ -101,6 +101,50 @@ def get_sdfs(pts, mesh):
     implicit_distance.FunctionValue(vtk_pts, sdfs)
     # Convert back to numpy array
     sdfs = vtk_to_numpy(sdfs)
+    
+    return sdfs
+
+def pcu_sdf(pts, mesh):
+    """
+    Calculates the signed distance functions (SDFs) for a set of points
+    given a mesh using Point Cloud Utils (PCU).
+    
+    Args:
+        pts (np.ndarray): (n_pts, 3) array of points
+        mesh (vtkPolyData or mskt.mesh.Mesh): VTK mesh
+    
+    Returns:
+        np.ndarray: (n_pts, ) array of SDFs
+    """
+
+    faces = vtk_to_numpy(mesh.GetPolys().GetData())
+    faces = faces.reshape(-1, 4)
+    faces = np.delete(faces, 0, 1)
+    points = vtk_to_numpy(mesh.GetPoints().GetData())
+    sdfs, face_ids, barycentric_coords = pcu.signed_distance_to_mesh(pts, points, faces)
+
+    return sdfs
+
+def get_sdfs(pts, mesh, method='pcu'):
+    """
+    Calculates the signed distance functions (SDFs) for a set of points
+    given a mesh.
+
+    Args:
+        pts (np.ndarray): (n_pts, 3) array of points
+        mesh (vtkPolyData or mskt.mesh.Mesh): VTK mesh
+        method (str, optional): Method to use. Defaults to 'pcu' as its faster
+    
+    Returns:
+        np.ndarray: (n_pts, ) array of SDFs
+    """
+    if issubclass(type(mesh), mskt.mesh.Mesh):
+        mesh = mesh.mesh
+    
+    if method == 'pcu':
+        sdfs = pcu_sdf(pts, mesh)
+    elif method == 'vtk':
+        sdfs = vtk_sdf(pts, mesh)
     
     return sdfs
 
@@ -170,6 +214,25 @@ def meshfix(mesh, assert_=False, assert_error=0.01):
     if assert_ is True:
         assert (n_pts_orig - n_pts_fixed) < (assert_error * n_pts_orig), f'Mesh dropped too many points, {n_pts_orig} -> {n_pts_fixed}'
 
+def get_cube_mins_maxs(pts):
+    """
+    Given a set of points, returns the mins and maxs of the points
+    in a cube.
+    
+    Args:
+        pts (np.ndarray): (n_pts, 3) array of points
+    
+    Returns:
+        tuple: (mins, maxs) of the points
+    """
+
+    mean = np.mean(pts, axis=0)
+    norm_pts = pts - mean
+    radial_max = np.max(np.linalg.norm(norm_pts, axis=-1))
+    mins = mean - radial_max
+    maxs = mean + radial_max
+    
+    return mins, maxs
 
 def read_mesh_get_sampled_pts(
     path, 
@@ -181,9 +244,6 @@ def read_mesh_get_sampled_pts(
     norm_pts=False,
     scale_method='max_rad',
     get_random=True,
-    return_orig_mesh=False,
-    return_new_mesh=False,
-    return_orig_pts=False,
     register_to_mean_first=False,
     mean_mesh=None,
     fix_mesh=True,
@@ -219,7 +279,7 @@ def read_mesh_get_sampled_pts(
     
     Notes:
     """
-    list_deprecated = ['return_scale', 'return_center']
+    list_deprecated = ['return_scale', 'return_center', 'return_orig_pts', 'return_orig_mesh', 'return_new_mesh']
     for kwarg in kwargs:
         if kwarg in list_deprecated:
             print(f'{kwarg} is deprecated and not used in this function - always True')
@@ -236,7 +296,9 @@ def read_mesh_get_sampled_pts(
     if fix_mesh is True:
         meshfix(orig_mesh)
     
-    results['orig_pts'] = orig_mesh.point_coords
+    # return orig_pts expanded dims for compatibility when storing
+    # multiple meshes in the same dictionary
+    results['orig_pts'] = [orig_mesh.point_coords]
 
     if (register_to_mean_first is True):
         # Rigid + scaling alginment of the original mesh to the mean mesh
@@ -277,11 +339,14 @@ def read_mesh_get_sampled_pts(
     new_mesh = orig_mesh.copy()
     new_mesh.point_coords = new_pts
 
+    results['new_pts'] = [new_pts]
+
     if get_random is True:
         if sigma is not None:
             rand_pts = get_pts_rel_surface(new_pts, mean=mean, sigma=sigma, n_pts=n_pts, function=rand_function)
         else:
-            rand_pts = get_rand_uniform_pts(n_pts)
+            mins, maxs = get_cube_mins_maxs(new_pts)
+            rand_pts = get_rand_uniform_pts(n_pts, mins=mins, maxs=maxs)
         
         if include_surf_in_pts is True:
             rand_pts = np.concatenate([rand_pts, new_pts], axis=0)
@@ -307,12 +372,20 @@ def read_mesh_get_sampled_pts(
     results['scale'] = scale
     results['center'] = center
 
-    if return_orig_mesh is True:
-        results['orig_mesh'] = [orig_mesh]
-    if return_new_mesh is True:
-        results['new_mesh'] = [new_mesh]
+    results['orig_mesh'] = [orig_mesh]
+    results['new_mesh'] = [new_mesh]
     
     return results
+
+def unpack_pts(data, pts_name='orig_pts'):
+    # get original points...
+    pts = []
+    pts_arrays = [x for x in data.files if f'{pts_name}_' in x]
+    if len(pts_arrays) > 0:
+        for pts_idx in range(len(pts_arrays)):
+            pts.append(data[f'{pts_name}_{pts_idx}'])
+        
+    return pts
 
 def unpack_numpy_data(
     data_,
@@ -320,6 +393,7 @@ def unpack_numpy_data(
 ):
     data = {}
 
+    # Get points / xyz coords
     if 'pts' in data_:
         data['xyz'] = torch.from_numpy(data_['pts']).float()
     elif 'xyz' in data_:
@@ -327,6 +401,7 @@ def unpack_numpy_data(
     else:
         raise ValueError('No pts or xyz in cached file')
     
+    # Get SDFs of the original points
     if 'sdfs' in data_:
         data['gt_sdf'] = torch.from_numpy(data_['sdfs']).float()
     elif 'gt_sdf' in data_:
@@ -335,9 +410,17 @@ def unpack_numpy_data(
         data['gt_sdf'] = torch.from_numpy(data_['sdf']).float()
     else:
         raise ValueError('No sdfs or gt_sdf or sdf in cached file')
-    
+
+    # Get random point cloud surface points... this was used for Diffusion SDFs model
     if point_cloud is True:
         data['point_cloud'] = torch.from_numpy(data_['point_cloud']).float()
+
+    # get original points...
+    orig_pts= unpack_pts(data_, pts_name='orig_pts')
+    data['orig_pts'] = orig_pts
+    # get new points...
+    new_pts = unpack_pts(data_, pts_name='new_pts')
+    data['new_pts'] = new_pts
 
     return data
 
@@ -351,9 +434,6 @@ def read_meshes_get_sampled_pts(
     norm_pts=False,
     scale_method='max_rad',
     get_random=True,
-    return_orig_mesh=False,
-    return_new_mesh=False,
-    return_orig_pts=False,
     register_to_mean_first=False,
     mean_mesh=None,
     fix_mesh=True,
@@ -363,12 +443,14 @@ def read_meshes_get_sampled_pts(
     center_all_meshes=False,
     mesh_to_scale=0,
     verbose=False,
+    icp_transform=None,
     **kwargs,
 ):
     """
     Function to read in and sample points from multiple meshes.
     """
-    list_deprecated = ['return_scale', 'return_center']
+    tic = time.time()
+    list_deprecated = ['return_scale', 'return_center', 'return_orig_pts', 'return_orig_mesh', 'return_new_mesh']
     for kwarg in kwargs:
         if kwarg in list_deprecated:
             print(f'{kwarg} is deprecated and not used in this function - always True')
@@ -390,6 +472,13 @@ def read_meshes_get_sampled_pts(
             meshfix(mesh)
         orig_meshes.append(mesh)
         orig_pts.append(mesh.point_coords)
+    
+    # return orig_pts
+    results['orig_pts'] = orig_pts
+
+    toc = time.time()
+    print(f'Finished reading meshes in {toc - tic:.3f}s')
+    tic = time.time()
 
     # Copy all meshes & points to new lists
     new_meshes = []
@@ -404,19 +493,21 @@ def read_meshes_get_sampled_pts(
         # of the model. This allows all downstream scaling to occur as expected
         # it also aligns the new bone with the mean/expected bone of the shape model
         # to maximize fidelity of the reconstruction.
-
+        print('Registering meshes to mean mesh')
         if mean_mesh is None:
             raise ValueError('Must provide mean mesh to register to')
-        icp_transform = orig_meshes[mesh_to_scale].rigidly_register(
-            other_mesh=mean_mesh,
-            as_source=True,
-            apply_transform_to_mesh=False,
-            return_transformed_mesh=False,
-            max_n_iter=100,
-            n_landmarks=1000,
-            reg_mode='similarity',
-            return_transform=True,
-        )
+
+        if icp_transform is None:
+            icp_transform = orig_meshes[mesh_to_scale].rigidly_register(
+                other_mesh=mean_mesh,
+                as_source=True,
+                apply_transform_to_mesh=False,
+                return_transformed_mesh=False,
+                max_n_iter=100,
+                n_landmarks=1000,
+                reg_mode='similarity',
+                return_transform=True,
+            )
         results['icp_transform'] = icp_transform
 
         # apply transform to all meshes
@@ -426,8 +517,13 @@ def read_meshes_get_sampled_pts(
 
     else:
         results['icp_transform'] = None
+    
+    toc = time.time()
+    print(f'Finished registering meshes in {toc - tic:.3f}s')
+    tic = time.time()
 
     if (center_pts is True) or (norm_pts is True):
+        print('Scaling and centering meshes')
         if scale_all_meshes is True:
             pts_ = np.concatenate(new_pts, axis=0)
             if center_all_meshes is True:
@@ -462,21 +558,31 @@ def read_meshes_get_sampled_pts(
         # Do nothing to the points because they are left the same.
         scale = 1
         center = np.zeros(3)
+    
+    toc = time.time()
+    print(f'Finished centering and scaling meshes in {toc - tic:.3f}s')
+    tic = time.time()
 
     for mesh_idx, new_mesh in enumerate(new_meshes):
         new_mesh.point_coords = new_pts[mesh_idx]
+    
+    results['new_pts'] = new_pts
 
     if get_random is True:
         rand_pts = []
         rand_sdf = []
         pts_surface = []
 
+        if None in sigma:
+            pts_cube = np.concatenate(new_pts, axis=0)
+            mins, maxs = get_cube_mins_maxs(pts_cube)
+
         for new_pts_idx, new_pts_ in enumerate(new_pts):
             if n_pts[new_pts_idx]  > 0:
                 if sigma[new_pts_idx] is not None:
                     rand_pts_ = get_pts_rel_surface(new_pts_, mean=mean, sigma=sigma[new_pts_idx], n_pts=n_pts[new_pts_idx], function=rand_function)
                 else:
-                    rand_pts_ = get_rand_uniform_pts(n_pts[new_pts_idx])
+                    rand_pts_ = get_rand_uniform_pts(n_pts[new_pts_idx], mins=mins, maxs=maxs)
                 
                 if include_surf_in_pts is True:
                     rand_pts_ = np.concatenate([rand_pts_, new_pts_], axis=0)
@@ -490,8 +596,15 @@ def read_meshes_get_sampled_pts(
         rand_pts = np.concatenate(rand_pts, axis=0)
         pts_surface = np.concatenate(pts_surface, axis=0)
 
+        
         for new_mesh in new_meshes:
+            tic_ = time.time()
+            print(rand_pts.shape, new_mesh.point_coords.shape)
+            print(rand_pts.dtype, new_mesh.point_coords.dtype)
+            print(type(rand_pts))
             rand_sdf.append(get_sdfs(rand_pts, new_mesh))
+            toc_ = time.time()
+            print(f'Finished calculating SDFs in {toc_ - tic_:.3f}s')
 
         results['pts'] = rand_pts
         results['sdf'] = rand_sdf
@@ -526,21 +639,21 @@ def read_meshes_get_sampled_pts(
             pts_surface.append([pts_idx] * new_pts_.shape[0])
         pts_surface = np.concatenate(pts_surface, axis=0)
 
-        new_pts = np.concatenate(new_pts, axis=0)
-
-        results['pts'] = new_pts
+        results['pts'] = np.concatenate(new_pts, axis=0)
         results['sdf'] = sdfs
         results['pts_surface'] = pts_surface
+    
+    toc = time.time()
+    print(f'Finished getting random points and SDFs in {toc - tic:.3f}s')
+
+
+    results['new_pts'] = new_pts
 
     results['scale'] = scale
     results['center'] = center
 
-    if return_orig_mesh is True:
-        results['orig_mesh'] = orig_meshes
-    if return_orig_pts is True:
-        results['orig_pts'] = orig_pts
-    if return_new_mesh is True:
-        results['new_mesh'] = new_meshes
+    results['orig_mesh'] = orig_meshes
+    results['new_mesh'] = new_meshes
 
     return results
 
@@ -594,6 +707,7 @@ class SDFSamples(torch.utils.data.Dataset):
         axis_align=False,
         norm_pts=False,
         scale_method='max_rad',
+        scale_jointly=False,
         loc_save=os.environ['LOC_SDF_CACHE'],
         include_seed_in_hash=True,
         save_cache=True,
@@ -617,6 +731,7 @@ class SDFSamples(torch.utils.data.Dataset):
         self.axis_align = axis_align
         self.norm_pts = norm_pts
         self.scale_method = scale_method
+        self.scale_jointly = scale_jointly
         self.loc_save = loc_save
         self.include_seed_in_hash = include_seed_in_hash
         self.random_seed = random_seed
@@ -627,6 +742,13 @@ class SDFSamples(torch.utils.data.Dataset):
         self.load_cache = load_cache
         self.save_cache = save_cache
         self.print_filename = print_filename
+
+        # set defaults so can use same 'norm_and_scale_all_meshes' function
+        # for single and multiple meshes
+        if not hasattr(self, 'reference_object'):
+            self.reference_object = 0
+        if not hasattr(self, 'n_meshes'):
+            self.n_meshes = 1
 
         # preprocess inputs before proceeding
         self.preprocess_inputs()
@@ -656,13 +778,90 @@ class SDFSamples(torch.utils.data.Dataset):
                 print('Skipping mesh:', loc_mesh)
                 print('Error in loading')
         
+        if self.scale_jointly is True:
+            self.norm_and_scale_all_meshes()
+    
+    def norm_and_scale_all_meshes(self):
+        """
+        Normalize and scale all of the meshes.
+
+        Take the average of the center of each mesh and uses it to center all of the meshes.
+        Then, takes the max radius of all of the meshes (after centering) and uses it to 
+        scale all of the meshes.
+
+        Now, all of the meshes are centered and scaled jointly so the anatomical surfaces should
+        roughly be aligned, removing this as a source of variation.
+        """
+        # get the center of all of the meshes
+        centers = []
+        for data in self.data:
+            # center around the reference object
+            xyz = data['new_pts'][self.reference_object]
+            center = np.mean(xyz, axis=0)
+            centers.append(center)
+        centers = np.stack(centers, axis=0)
+        center = np.mean(centers, axis=0).astype(np.float32)
+
+        # subtract the center from all of the meshes
+        for idx, data in enumerate(self.data):
+            self.data[idx]['xyz'] -= center
+            # iterate over all of the meshes and subtract the center
+            for mesh_idx in range(self.n_meshes):
+                self.data[idx]['new_pts'][mesh_idx] -= center
+        
+        # get the max radius of all of the meshes
+        max_radii = 0
+        for data in self.data:
+            for mesh_idx in range(self.n_meshes):
+                xyz = data['new_pts'][mesh_idx]
+                max_radius = np.max(np.linalg.norm(xyz, axis=-1)).astype(np.float32)
+                if max_radius > max_radii:
+                    max_radii = max_radius
+        
+                
+        # divide all of the meshes by the max radius
+        for idx, data in enumerate(self.data):
+            self.data[idx]['xyz'] /= max_radii
+            # do the same for the sdf of each point
+            self.data[idx]['gt_sdf'] /= max_radii
+            # do the same for the original points
+            for mesh_idx in range(self.n_meshes):
+                self.data[idx]['new_pts'][mesh_idx] /= max_radii
+
+        
     def preprocess_inputs(self):
         """
         Preprocess inputs to ensure they are in the correct format.
         """
 
-        pass
+        if self.scale_jointly is True:
+            if self.center_pts is True:
+                raise ValueError('Scale jointly assumes centering at end... so center should be False')
+            if self.norm_pts is True:
+                raise ValueError('Scale jointly assumes normalizing at end... so norm should be False')
     
+    def get_dict_pts(self, data, pts_name):
+        dict_pts = {}
+        for idx_, orig_pts_ in enumerate(data[pts_name]):
+            dict_pts[f'{pts_name}_{idx_}'] = orig_pts_
+        return dict_pts
+
+    def save_data_to_cache(self, data, file_hash):
+        """
+        Save the data to the cache.
+        
+        Args:
+            data (dict): Dictionary of data to save
+            file_hash (str): Hash of the file
+        """
+        # if want to cache, and new... then save. 
+        filepath = os.path.join(self.cache_folder, f'{file_hash}.npz')
+        dict_pts = {}
+        dict_pts.update(self.get_dict_pts(data, 'orig_pts'))
+        dict_pts.update(self.get_dict_pts(data, 'new_pts'))
+
+        np.savez(filepath, pts=data['xyz'], sdfs=data['gt_sdf'], **dict_pts)
+
     def get_sample_data_dict(self, loc_mesh):
         """
         Given a mesh path, return a dictionary of the sampled points and SDFs.
@@ -693,7 +892,7 @@ class SDFSamples(torch.utils.data.Dataset):
                 'gt_sdf': torch.zeros((self.n_pts)),
             }
             pts_idx = 0
-            for n_pts_, sigma_ in self.pt_sample_combos:
+            for idx_, (n_pts_, sigma_) in enumerate(self.pt_sample_combos):
                 result_ = read_mesh_get_sampled_pts(
                     loc_mesh, 
                     mean=[0,0,0], 
@@ -706,7 +905,6 @@ class SDFSamples(torch.utils.data.Dataset):
                     get_random=True,
                     return_orig_mesh=False,
                     return_new_mesh=False,
-                    return_orig_pts=False,
                     fix_mesh=self.fix_mesh,
                     register_to_mean_first=False if self.reference_mesh is None else True,
                     mean_mesh=self.reference_mesh,
@@ -722,10 +920,12 @@ class SDFSamples(torch.utils.data.Dataset):
                 data['gt_sdf'][pts_idx:pts_idx + n_pts_] = torch.from_numpy(sdfs_).float()
                 pts_idx += n_pts_
 
+                if idx_ == 0:
+                    data['orig_pts'] = torch.from_numpy(result_['orig_pts']).float()
+                    data['new_pts'] = torch.from_numpy(result_['new_pts']).float()
+
             if self.save_cache is True:
-                # if want to cache, and new... then save. 
-                filepath = os.path.join(self.cache_folder, f'{file_hash}.npz')
-                np.savez(filepath, pts=data['xyz'], sdfs=data['gt_sdf'])
+                self.save_data_to_cache(data, file_hash)
 
         pos_idx, neg_idx, surf_idx = self.sdf_pos_neg_idx(data)
         data['pos_idx'] = pos_idx
@@ -845,6 +1045,7 @@ class SDFSamples(torch.utils.data.Dataset):
             self.rand_function,
             self.reference_mesh,
             self.fix_mesh,
+            self.scale_jointly
         ]
 
         return list_hash_params
@@ -949,6 +1150,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
         axis_align=False,
         norm_pts=False,
         scale_method='max_rad',
+        scale_jointly=False,
         loc_save=os.environ['LOC_SDF_CACHE'],
         include_seed_in_hash=True,
         save_cache=True,
@@ -987,6 +1189,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
             axis_align=axis_align,
             norm_pts=norm_pts,
             scale_method=scale_method,
+            scale_jointly=scale_jointly,
             loc_save=loc_save,
             include_seed_in_hash=include_seed_in_hash,
             save_cache=save_cache,
@@ -998,59 +1201,10 @@ class MultiSurfaceSDFSamples(SDFSamples):
             fix_mesh=fix_mesh,
             print_filename=print_filename,
         )
-
-        # self.list_mesh_paths = list_mesh_paths
-        # self.subsample = subsample
-        # self.n_pts = n_pts
-        # self.p_near_surface = p_near_surface
-        # self.p_further_from_surface = p_further_from_surface
-        # self.sigma_near = sigma_near
-        # self.sigma_far = sigma_far
-        # self.rand_function = rand_function
-        # self.center_pts = center_pts
-        # self.axis_align = axis_align
-        # self.norm_pts = norm_pts
-        # self.scale_method = scale_method
-        # self.loc_save = loc_save
-        # self.include_seed_in_hash = include_seed_in_hash
-        # self.random_seed = random_seed
-        # self.reference_mesh = reference_mesh             #
-        # self.verbose = verbose
-        # self.equal_pos_neg = equal_pos_neg
-        # self.fix_mesh = fix_mesh
-        # self.load_cache = load_cache
-        # self.save_cache = save_cache
-        
-        # # preprocess inputs before proceeding
-        # self.preprocess_inputs()
-
-        # self.list_hash_params = self.get_hash_params()
-        
-        # if save_cache is True:
-        #     cache_folder = os.path.join(self.loc_save, today_date)
-        #     os.makedirs(cache_folder, exist_ok=True)
-
-        # # get the combinations of points and sigmas to sample
-        # self.pt_sample_combos = self.get_pt_sample_combos()
-
-        # if self.reference_mesh is not None:
-        #     self.load_reference_mesh()
-
-        # self.data = []
-        # for loc_meshes in list_mesh_paths:
-        #     if self.verbose is True:
-        #         print('Loading mesh:', loc_meshes)
-
-        #     data = self.get_sample_data_dict(loc_meshes)  
-
-        #     if data is not None:
-        #         self.data.append(data)
-        #     else:
-        #         print('Skipping mesh:', loc_meshes)
-        #         print('Error in loading')
-
     
     def preprocess_inputs(self):
+        super().preprocess_inputs()
+
         if isinstance(self.list_mesh_paths[0], (list, tuple)):
             self.n_meshes = len(self.list_mesh_paths[0])
         elif isinstance(self.list_mesh_paths[0], (str, mskt.mesh.Mesh)):
@@ -1091,7 +1245,9 @@ class MultiSurfaceSDFSamples(SDFSamples):
                 'gt_sdf': torch.zeros((sum(self.n_pts), len(loc_meshes))),
             }
             pts_idx = 0
-            for n_pts_, sigma_ in self.pt_sample_combos:
+            icp_transform = None
+            for idx_, (n_pts_, sigma_) in enumerate(self.pt_sample_combos):
+                tic = time.time()
                 result_ = read_meshes_get_sampled_pts(
                     loc_meshes, 
                     mean=[0,0,0], 
@@ -1102,9 +1258,6 @@ class MultiSurfaceSDFSamples(SDFSamples):
                     norm_pts=self.norm_pts,
                     scale_method=self.scale_method,
                     get_random=True,
-                    return_orig_mesh=False,
-                    return_new_mesh=False,
-                    return_orig_pts=False,
                     fix_mesh=self.fix_mesh,
                     register_to_mean_first=False if self.reference_mesh is None else True,  #
                     mean_mesh=self.reference_mesh,  # 
@@ -1113,10 +1266,21 @@ class MultiSurfaceSDFSamples(SDFSamples):
                     mesh_to_scale=self.mesh_to_scale,
                     scale_all_meshes=self.scale_all_meshes,
                     center_all_meshes=self.center_all_meshes,
+
+                    icp_transform=icp_transform,
                 )
-                
+
                 if result_ is None:
                     return None
+                
+                icp_transform = result_['icp_transform']
+
+                toc = time.time()
+                print(f'{idx_} - {sigma_}: {toc - tic}s')
+                
+                if idx_ == 0:
+                    data['orig_pts'] = result_['orig_pts']
+                    data['new_pts'] = result_['new_pts']
                 
                 xyz_ = result_['pts'] if 'pts' in result_ else result_['xyz']
                 sdfs_ = result_['sdf'] if 'sdf' in result_ else result_['gt_sdf']
@@ -1128,9 +1292,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
                 pts_idx += sum(n_pts_)
             
             if (data is not None) and (self.save_cache is True):
-                # if want to cache, and new... then save. 
-                filepath = os.path.join(self.cache_folder, f'{file_hash}.npz')
-                np.savez(filepath, pts=data['xyz'], sdfs=data['gt_sdf'])
+                self.save_data_to_cache(data, file_hash)
         
         # Drop points that have are labeled as being inside
         # 2 objects - clearly this is an error. 
@@ -1191,6 +1353,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
             self.reference_object,
             False,
             self.fix_mesh,
+            self.scale_jointly
         ]
 
         for n_pts_ in self.n_pts:
