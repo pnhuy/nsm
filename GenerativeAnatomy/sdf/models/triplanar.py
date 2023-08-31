@@ -148,14 +148,18 @@ class TriplanarDecoder(nn.Module):
         n_objects=1,
         conv_hidden_dims=[512, 512, 512, 512, 512],
         conv_deep_image_size=2,
+        conv_norm=True,
+        conv_norm_type='batch',
+        conv_start_with_mlp=True,
         sdf_latent_size=128,
         sdf_hidden_dims=[512, 512, 512],
         sdf_weight_norm=True,
         sdf_final_activation='tanh',
         sdf_activation='relu',
+        
         sdf_dropout_prob=0.,
         sum_sdf_features=True,
-        
+        conv_pred_sdf=False,
         padding=0.1
     ):
         super(TriplanarDecoder, self).__init__()
@@ -172,6 +176,8 @@ class TriplanarDecoder(nn.Module):
         self.sdf_dropout_prob = sdf_dropout_prob
         self.sum_sdf_features = sum_sdf_features
         self.padding = padding
+        self.conv_pred_sdf = conv_pred_sdf
+        
 
         if self.sum_sdf_features is False:
             assert self.sdf_latent_size % 3 == 0, "sdf_latent_size must be divisible by 3 if sum_sdf_features is True"
@@ -179,11 +185,17 @@ class TriplanarDecoder(nn.Module):
         elif self.sum_sdf_features is True:
             vae_out_features = self.sdf_latent_size * 3
         
+        if self.conv_pred_sdf is True:
+            vae_out_features += 3
+        
         self.vae_decoder = VAEDecoder(
             latent_dim=latent_dim,
             out_features=vae_out_features,
             hidden_dims=conv_hidden_dims,
             deep_image_size=conv_deep_image_size,
+            norm=conv_norm,
+            norm_type=conv_norm_type,
+            start_with_mlp=conv_start_with_mlp
         )
 
         self.sdf_decoder = Decoder(
@@ -205,7 +217,9 @@ class TriplanarDecoder(nn.Module):
             plane_features: (N, 3 * sdf_latent_size, H, W)
             query: (N, 3)
         """
-        latent_size = self.sdf_latent_size
+
+        latent_size = self.sdf_latent_size + self.conv_pred_sdf # one sdf prediction per plane (if conv_pred_sdf is True)
+
         feat_xz = plane_features[:latent_size, ...]
         feat_yz = plane_features[latent_size:latent_size*2, ...]
         feat_xy = plane_features[latent_size*2:, ...]
@@ -293,138 +307,17 @@ class TriplanarDecoder(nn.Module):
             point_latents.append(point_latents_)
         
         point_latents = torch.cat(point_latents, dim=0)
+        
+        if self.conv_pred_sdf is True:
+            low_freq_sdf = point_latents[:,:1]
+            point_latents = point_latents[:,1:]
+
         sdf_features = torch.cat([point_latents, xyz], dim=1)
         sdf = self.sdf_decoder(sdf_features)
 
+        if self.conv_pred_sdf is True:
+            sdf = sdf + low_freq_sdf
+
         return sdf
-
-
-    
-    # def forward_with_plane_features(self, plane_features, unique_indices, query):
-    #     """
-        
-    #     args:
-    #         plane_features: (N, 3 * sdf_latent_size, H, W)
-    #         query: (N, 3)
-    #     """
-    #     feat_xz = plane_features[:, :self.sdf_latent_size, :, :]
-    #     feat_yz = plane_features[:, self.sdf_latent_size:2*self.sdf_latent_size, :, :]
-    #     feat_xy = plane_features[:, 2*self.sdf_latent_size:, :, :]
-
-    #     plane_feats_list = []
-    #     plane_feats_list.append(self.sample_plane_features(query, unique_indices, feat_xz, 'xz'))
-    #     plane_feats_list.append(self.sample_plane_features(query, unique_indices, feat_yz, 'yz'))
-    #     plane_feats_list.append(self.sample_plane_features(query, unique_indices, feat_xy, 'xy'))
-
-    #     if self.sum_sdf_features is True:
-    #         plane_feats = 0
-    #         # sum plane features for each point
-    #         for plane_feat in plane_feats_list:
-    #             plane_feats += plane_feat
-            
-    #     elif self.sum_sdf_features is False:
-    #         plane_feats = torch.cat(plane_feats_list, dim=1)
-        
-    #     return plane_feats
-
-
-    # def sample_plane_features(self, query, unique_indices, plane_feature, plane):
-    #     """
-    #     args:
-    #         query: (N, 3)
-    #         unique_indices: (N,)
-    #         plane_feature: (N_, sdf_latent_size, H, W)
-    #         plane: 'xz', 'yz', 'xy'
-        
-    #     return:
-    #         sampled_feats: (N, sdf_latent_size)
-    #     """
-    #     # normalize coords to [-1, 1] & return 
-    #     grid = self.normalize_coordinates(query.clone(), plane=plane)
-
-    #     # preallocate array for resulting features
-    #     # (N, sdf_latent_size)
-    #     sampled_feats = torch.zeros(
-    #         query.shape[0],
-    #         plane_feature.shape[1],
-    #         dtype=plane_feature.dtype,
-    #         device=plane_feature.device
-    #     )
-
-    #     # iterate over plane_features (N_)
-    #     # need to do this way because might not have 
-    #     # constant number of points per plane
-    #     for i in range(plane_feature.shape[0]):
-    #         # get single plane feature (1, sdf_latent_size, H, W)
-    #         plane_feature_ = plane_feature[i:i+1, :, :, :] 
-    #         # get grid of points in shape [1, n_pts, 1, 2]
-    #         # n_pts is number of points for this plane (unique_indices==i)
-    #         grid_ = grid[None, unique_indices==i, None, :]
-            
-    #         sample = grid_sample(
-    #             input=plane_feature_,
-    #             grid=grid_,
-    #             padding_mode='border',
-    #             align_corners=True,
-    #             mode='bilinear'
-    #         )
-    #         # sample is (1, sdf_latent_size, n_pts, 1)
-    #         # need to reshape to (n_pts, sdf_latent_size)
-    #         sample = sample[0, :, :, 0].T
-    #         sampled_feats[unique_indices==i, :] = sample
-
-    #     return sampled_feats
-
-    # def normalize_coordinates(self, query, plane, padding=0.1):
-    #     if plane == 'xy':
-    #         xy = query[:, [0, 1]]
-    #     elif plane == 'xz':
-    #         xy = query[:, [0, 2]]
-    #     elif plane == 'yz':
-    #         xy = query[:, [1, 2]]
-    #     else:
-    #         raise ValueError("plane must be 'xy', 'xz', or 'yz'")
-
-    #     xy_new = xy / (1 + self.padding + 10e-6)
-    #     if xy_new.min() < -1:
-    #         xy_new[xy_new < -1] = -1
-    #     if xy_new.max() > 1:
-    #         xy_new[xy_new > 1] = 1
-        
-    #     return xy_new
-
-    # def forward(self, x, epoch=None):
-    #     xyz = x[:, -3:]
-    #     latent = x[:, :-3]
-
-    #     # get unique latent codes
-    #     unique_latent, unique_indices = unique_consecutive(latent, 0, True)
-    #     # get plane features for each unique latent code
-    #     plane_features = self.vae_decoder(unique_latent)
-    #     # plane_features_ = self.vae_decoder(unique_latent)
-    #     # # unpack plane features using unique indices
-    #     # plane_features = torch.zeros(
-    #     #     latent.shape[0],
-    #     #     plane_features_.shape[1],
-    #     #     plane_features_.shape[2],
-    #     #     plane_features_.shape[3],
-    #     #     device=latent.device
-    #     # )
-    #     # for idx in range(unique_latent.shape[0]):
-    #     #     plane_features[unique_indices == idx, :] = plane_features_[idx, :]
-        
-    #     # # get plane features for each point
-    #     point_latents = self.forward_with_plane_features(plane_features, unique_indices, xyz)
-
-    #     # get sdf(s) from MLP decoder
-    #     sdf_features = torch.cat([point_latents, xyz], dim=1)
-    #     sdf = self.sdf_decoder(sdf_features)
-
-    #     return sdf
-
-
-
-
-
 
 
