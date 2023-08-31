@@ -1,4 +1,4 @@
-import GenerativeAnatomy
+import NSM
 
 
 def test_fake_1(timing=False):

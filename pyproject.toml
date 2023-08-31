@@ -12,8 +12,8 @@ build-backend = "setuptools.build_meta"
 #Specify the requirements needed to build the project itself. 
 #Instructions for defining the project info
 [project]
-name = "GenerativeAnatomy"
-description = "Library for learning to generate human anatomy using generative machine learning methods"
+name = "NSM"
+description = "Library for creating Neural Shape Models (NSM)"
 readme = "README.md"
 requires-python = ">=3.7"
 keywords = ["python"]
@@ -32,17 +32,17 @@ dynamic = ["version"]
 
 
 [project.urls]
-Homepage = "https://github.com/gattia/GenerativeAnatomy/"
-Documentation = "https://anthonygattiphd.com/GenerativeAnatomy/" 
+Homepage = "https://github.com/gattia/NSM/"
+Documentation = "https://anthonygattiphd.com/NSM/" 
 
 # Dynamic metadata - E.g., version here. 
 # https://setuptools.pypa.io/en/latest/userguide/pyproject_config.html#dynamic-metadata
 [tool.setuptools.dynamic]
-version = {attr = "GenerativeAnatomy.__version__"} 
+version = {attr = "NSM.__version__"} 
 
 # setuptools specific items
 [tool.setuptools]
-packages = ['GenerativeAnatomy'] 
+packages = ['NSM'] 
 
 # information about "tools" 
 [tool.isort]

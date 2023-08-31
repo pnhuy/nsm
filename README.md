@@ -1,6 +1,6 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)<br>
-![Build Status](https://github.com/gattia/GenerativeAnatomy/actions/workflows/build-test.yml/badge.svg?branch=main)<br>
-|[Documentation](http://anthonygattiphd.com/GenerativeAnatomy/)|
+![Build Status](https://github.com/gattia/NSM/actions/workflows/build-test.yml/badge.svg?branch=main)<br>
+|[Documentation](http://anthonygattiphd.com/NSM/)|
 
 
 
@@ -12,6 +12,45 @@ Steps to update this package for new repository:
 4. update `requirements.txt` and `dependencies` in `pyproject.toml`
      - To do - can dependencies read/update from requirements.txt?
 
+
+# Install Instructions
+
+```bash
+conda create -n NSM python=3.8
+conda activate NSM
+```
+
+
+# Install pymskt: https://github.com/gattia/pymskt
+
+``` bash
+git clone https://github.com/gattia/pymskt
+make requirements
+pip install .  # pip install -e . if you want it in editable mode to update pymskt
+```
+
+``` bash
+mamba install pytorch==2.0.0 torchvision==0.15.0 torchaudio==2.0.0 pytorch-cuda=11.7 -c pytorch -c nvidia
+make requirements
+```
+
+```bash
+# install in development mode... 
+pip install -e .
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
 # Install - only tried for SDF stuff
 <!-- mamba install pytorch=1.13.0 torchvision pytorch-cuda=11.6 -c pytorch -c nvidia -y
 mamba install -c fvcore -c iopath -c conda-forge fvcore iopath -y
@@ -22,9 +61,6 @@ make requirements -->
 
 
 mamba install pytorch torchvision pytorch-cuda fvcore iopath nvidiacub pytorch3d -c pytorch -c nvidia -c fvcore -c iopath -c conda-forge -c bottler -c pytorch3d -y
-
-mamba install pytorch-scatter -c pyg
-
 make requirements
 
 git clone https://github.com/gattia/pymskt
@@ -39,30 +75,14 @@ You should be able to install this by cloning, navigating to this root directory
 
 Install pymskt: https://github.com/gattia/pymskt
 
-Install diffusion_net: https://github.com/nmwsharp/diffusion-net
 
-#pytorch 3D for chamfer loss: 
-```bash
-conda install -c pytorch pytorch=1.9.1 torchvision cudatoolkit=10.2
-conda install -c fvcore -c iopath -c conda-forge fvcore iopath
-conda install -c bottler nvidiacub
 
-conda install pytorch3d -c pytorch3d
-```
-
-```bash
-mamba install -c pytorch pytorch=1.9.1 torchvision cudatoolkit=10.2
-mamba install -c fvcore -c iopath -c conda-forge fvcore iopath
-mamba install -c bottler nvidiacub
-
-mamba install pytorch3d -c pytorch3d
-```
 
 ```
-git clone https://github.com/gattia/GenerativeAnatomy
-cd GenerativeAnatomy
+git clone https://github.com/gattia/NSM
+cd NSM
 
-conda create -n GenerativeAnatomy python=3.8
+conda create -n NSM python=3.8
 
 pip install . 
 
@@ -75,10 +95,10 @@ This method of install will install in editable mode. This means that the code w
 in your python's `site-packages`, instead `site-packages` will point to this directory. So, if the code 
 changes in here, so will the version of this package used on your local build. 
 ```
-git clone https://github.com/gattia/GenerativeAnatomy
-cd GenerativeAnatomy
+git clone https://github.com/gattia/NSM
+cd NSM
 
-conda create -n GenerativeAnatomy python=3.8
+conda create -n NSM python=3.8
 
 make dev
 make install-dev

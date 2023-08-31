@@ -1,6 +1,6 @@
-# Contributing to GenerativeAnatomy
+# Contributing to NSM
 
-Thank you for considering to contribute to `GenerativeAnatomy`.
+Thank you for considering to contribute to `NSM`.
 
 This guide is inspired by [DOSMA](https://github.com/ad13/DOSMA).
 
@@ -31,7 +31,7 @@ A world-class feature request addresses the following points:
 4. In case this is related to a paper, please attach a link;
 5. Attach any additional information (drawings, screenshots, etc.) you think may help.
 
-If your issue is well written we're already 80% of the way there by the time you post it. Follow the instructions in the [Feature Request](https://github.com/gattia/GenerativeAnatomy/issues/new/choose)
+If your issue is well written we're already 80% of the way there by the time you post it. Follow the instructions in the [Feature Request](https://github.com/gattia/NSM/issues/new/choose)
 
 ## Contributing
 Before writing code, we strongly advise you to search through the existing PRs or issues to make sure that nobody is already working on the same thing. If you are unsure, it is always a good idea to open an issue to get some feedback.
@@ -40,17 +40,17 @@ You will need basic git proficiency to be able to contribute to cycpd. git is no
 
 Follow these steps to start contributing:
 
-1. Fork the [`repository`](https://github.com/gattia/GenerativeAnatomy) by clicking on the 'Fork' button the repository's page. This creates a copy of the code under your GitHub user account.
+1. Fork the [`repository`](https://github.com/gattia/NSM) by clicking on the 'Fork' button the repository's page. This creates a copy of the code under your GitHub user account.
 
 2. Clone your fork to your local disk, and add the base repository as a remote:
 
    ```bash
-   $ git clone git@github.com:<your Github handle>/GenerativeAnatomy.git
-   $ cd GenerativeAnatomy
-   $ git remote add upstream https://github.com/gattia/GenerativeAnatomy.git
+   $ git clone git@github.com:<your Github handle>/NSM.git
+   $ cd NSM
+   $ git remote add upstream https://github.com/gattia/NSM.git
    ```
 
-3. Create a development branch - all changes should merged with the `GenerativeAnatomy`-`development` branch:
+3. Create a development branch - all changes should merged with the `NSM`-`development` branch:
 
    ```bash
    $ git checkout -b development
@@ -155,7 +155,7 @@ This should be done **before** pushing your changes to your respository to ensur
 ### Tests
 
 Library tests can be found in the 
-[tests folder](https://github.com/gattia/GenerativeAnatomy/tree/main/testing).
+[tests folder](https://github.com/gattia/NSM/tree/main/testing).
 
 From the root of the repository, here's how to run tests with `pytest` for the library:
 
@@ -164,8 +164,8 @@ $ make test
 ```
 
 ### Style guide
-`GenerativeAnatomy` does not currently have proper/extensive documentation. 
+`NSM` does not currently have proper/extensive documentation. 
 
-Automatically building documentation, and re-building figures would be a great addition to the `GenerativeAnatomy`.
+Automatically building documentation, and re-building figures would be a great addition to the `NSM`.
 
 If/when documentation is implemented, we will follow the [numpy style](https://numpydoc.readthedocs.io/en/latest/format.html).

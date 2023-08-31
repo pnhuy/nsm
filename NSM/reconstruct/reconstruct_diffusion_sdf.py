@@ -1,25 +1,19 @@
 import torch
 import numpy as np
 
-from GenerativeAnatomy.sdf.mesh import create_mesh_diffusion_sdf
+from NSM.mesh import create_mesh_diffusion_sdf
 
-from GenerativeAnatomy.sdf.datasets import (
+from NSM.datasets import (
     read_mesh_get_sampled_pts, 
     read_meshes_get_sampled_pts
 )
 
-try:
-    from pytorch3d.loss import chamfer_distance
-    __chamfer__ = True
-except:
-    print('Error importing `chamfer_distance` from pytorch3d.loss')
-    __chamfer__ = False
 
 try:
-    from GenerativeAnatomy.dependencies import sinkhorn
+    from NSM.dependencies import sinkhorn
     __emd__ = True
 except:
-    print('Error importing `sinkhorn` from GenerativeAnatomy.dependencies')
+    print('Error importing `sinkhorn` from NSM.dependencies')
     __emd__ = False
 
 from .recon_evaluation import compute_recon_loss

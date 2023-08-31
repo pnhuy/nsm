@@ -1,7 +1,6 @@
 import torch
 
 from .utils import (
-    compute_chamfer,
     adjust_learning_rate
 )
 
@@ -9,17 +8,16 @@ from .recon_evaluation import compute_recon_loss
 
 from .predictive_validation_class import Regress
 
-from GenerativeAnatomy.sdf.datasets import (
+from NSM.datasets import (
     read_mesh_get_sampled_pts, 
     get_pts_center_and_scale,
     read_meshes_get_sampled_pts
 )
-from GenerativeAnatomy.sdf.mesh import create_mesh
+from NSM.mesh import create_mesh
 
 from .reconstruct_latent_S3 import reconstruct_latent_S3
 from .reconstruct_diffusion_sdf import reconstruct_mesh_diffusion_sdf
 
-# from GenerativeAnatomy.sdf.testing import get_mean_errors
 import numpy as np
 import sys
 import os
@@ -29,22 +27,11 @@ import wandb
 import time
 
 try:
-    from pytorch3d.loss import chamfer_distance
-    __chamfer__ = True
-except:
-    print('Error importing `chamfer_distance` from pytorch3d.loss')
-    __chamfer__ = False
-
-try:
-    from GenerativeAnatomy.dependencies import sinkhorn
+    from NSM.dependencies import sinkhorn
     __emd__ = True
 except:
-    print('Error importing `sinkhorn` from GenerativeAnatomy.dependencies')
+    print('Error importing `sinkhorn` from NSM.dependencies')
     __emd__ = False
-
-
-
-
 
 def reconstruct_latent(
     decoders,

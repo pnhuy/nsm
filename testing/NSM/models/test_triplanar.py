@@ -1,4 +1,4 @@
-from GenerativeAnatomy.sdf.models import TriplanarDecoder
+from NSM.models import TriplanarDecoder
 import torch
 
 def test_triplanar(

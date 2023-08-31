@@ -1,17 +1,10 @@
 import numpy as np
 
-# try:
-#     from pytorch3d.loss import chamfer_distance
-#     __chamfer__ = True
-# except:
-#     print('Error importing `chamfer_distance` from pytorch3d.loss')
-#     __chamfer__ = False
-
 try:
-    from GenerativeAnatomy.dependencies import sinkhorn
+    from NSM.dependencies import sinkhorn
     __emd__ = True
 except:
-    print('Error importing `sinkhorn` from GenerativeAnatomy.dependencies')
+    print('Error importing `sinkhorn` from NSM.dependencies')
     __emd__ = False
 
 from .utils import compute_chamfer, compute_assd

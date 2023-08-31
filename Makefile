@@ -34,9 +34,9 @@ dev-conda:
 	conda install --file requirements-dev.txt
 
 docs:
-	pdoc --output-dir docs/ --html --force GenerativeAnatomy
-	mv docs/GenerativeAnatomy/* docs/
-	rm -rf docs/GenerativeAnatomy
+	pdoc --output-dir docs/ --html --force NSM
+	mv docs/NSM/* docs/
+	rm -rf docs/NSM
 
 
 test:

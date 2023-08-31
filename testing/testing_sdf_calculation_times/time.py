@@ -1,7 +1,7 @@
 import os
 os.environ['LOC_SDF_CACHE'] = '/dataNAS/people/aagatti/projects/deepsdf_femur/cache' 
 
-from GenerativeAnatomy.sdf.datasets import MultiSurfaceSDFSamples
+from NSM.datasets import MultiSurfaceSDFSamples
 
 import json
 with open('/dataNAS/people/aagatti/projects/OAI_Segmentation/data_splits_July.5.2023.json', 'r') as f:

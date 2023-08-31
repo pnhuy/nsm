@@ -1,6 +1,6 @@
 import argparse
 
-import GenerativeAnatomy
+import NSM
 
 
 def main(number=10):

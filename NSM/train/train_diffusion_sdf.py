@@ -3,16 +3,16 @@ import torch
 import wandb
 import os
 
-from GenerativeAnatomy.sdf.sdf_utils import (
+from NSM.utils import (
     save_model,
     get_checkpoints,
 )
 
-from GenerativeAnatomy.sdf.train.utils import (
+from NSM.train.utils import (
     add_plain_lr_to_config
 )
 
-from GenerativeAnatomy.sdf.reconstruct import get_mean_errors
+from NSM.reconstruct import get_mean_errors
 
 
 def train_diffusion_sdf(

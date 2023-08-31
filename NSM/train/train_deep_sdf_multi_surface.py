@@ -1,4 +1,4 @@
-from GenerativeAnatomy.sdf.sdf_utils import (
+from NSM.utils import (
     get_learning_rate_schedules, 
     adjust_learning_rate, 
     save_latent_vectors,
@@ -7,9 +7,9 @@ from GenerativeAnatomy.sdf.sdf_utils import (
     get_latent_vecs,
     get_checkpoints,
 )
-from GenerativeAnatomy.sdf.reconstruct import get_mean_errors, compare_cart_thickness
+from NSM.reconstruct import get_mean_errors, compare_cart_thickness
 
-from GenerativeAnatomy.sdf.train.utils import (
+from NSM.train.utils import (
     get_kld,
     cyclic_anneal_linear,
     calc_weight,

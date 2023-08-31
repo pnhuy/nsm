@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from GenerativeAnatomy.sdf.datasets import (
+from NSM.datasets import (
     read_mesh_get_sampled_pts, 
     get_pts_center_and_scale,
 )
