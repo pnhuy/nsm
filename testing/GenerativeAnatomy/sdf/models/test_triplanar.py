@@ -19,6 +19,7 @@ def test_triplanar(
         latent_dim=latent_size,
         n_objects=n_objects,
         conv_deep_image_size=deep_size,
+        conv_pred_sdf=True
     )
 
     # setup optimizer for triplanar
@@ -38,3 +39,7 @@ def test_triplanar(
 
     sdf = triplanar(torch.cat([latent, xyz], dim=1))
     assert sdf.sum() < loss
+
+
+if __name__ == '__main__':
+    test_triplanar()
