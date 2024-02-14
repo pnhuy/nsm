@@ -1,5 +1,6 @@
 import os
 import pymskt as mskt
+from pymskt.mesh import Mesh
 import numpy as np
 import vtk
 from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
@@ -9,6 +10,14 @@ from datetime import datetime
 import warnings
 import time
 import point_cloud_utils as pcu
+from multiprocessing import Pool
+import zipfile
+import gc
+try:
+    from pympler import tracker, muppy #asizeof, summary, muppy, tracker
+except ModuleNotFoundError:
+    print('Pympler not installed, cannot use asizeof - if trying to debug memory usage, install pympler')
+
 
 
 today_date = datetime.now().strftime("%b_%d_%Y")
@@ -82,6 +91,12 @@ def get_pts_center_and_scale(
     
     return center, scale
 
+def is_zipfile(filename):
+    try:
+        return zipfile.is_zipfile(filename)
+    except (IOError, zipfile.BadZipfile):
+        return False
+    
 def meshfix(mesh, assert_=False, assert_error=0.01):
     """
     Fixes a mesh using meshfix.
@@ -178,7 +193,7 @@ def read_mesh_get_sampled_pts(
         return None
 
     # read in mesh & "fix" using meshfix if requested
-    orig_mesh = mskt.mesh.Mesh(path)
+    orig_mesh = Mesh(path)
     if fix_mesh is True:
         meshfix(orig_mesh)
     
@@ -229,7 +244,7 @@ def read_mesh_get_sampled_pts(
 
     if get_random is True:
         if sigma is not None:
-            rand_pts = new_mesh.rand_pts_around_surface(n_pts=n_pts, surface_method='bluenoise', distribution=rand_function, sigma=sigma)
+            rand_pts = new_mesh.rand_pts_around_surface(n_pts=n_pts, surface_method='random', distribution=rand_function, sigma=sigma)
         else:
             mins, maxs = get_cube_mins_maxs(new_pts)
             rand_pts = get_rand_uniform_pts(n_pts, mins=mins, maxs=maxs)
@@ -269,14 +284,16 @@ def unpack_pts(data, pts_name='orig_pts'):
     pts_arrays = [x for x in data.files if f'{pts_name}_' in x]
     if len(pts_arrays) > 0:
         for pts_idx in range(len(pts_arrays)):
-            pts.append(data[f'{pts_name}_{pts_idx}'])
+            pts.append(torch.from_numpy(data[f'{pts_name}_{pts_idx}']))
         
     return pts
 
 def unpack_numpy_data(
     data_,
-    point_cloud=False
+    point_cloud=False,
+    list_additional_keys=['orig_pts', 'new_pts', 'pos_idx', 'neg_idx', 'surf_idx']
 ):
+    
     data = {}
 
     # Get points / xyz coords
@@ -300,13 +317,10 @@ def unpack_numpy_data(
     # Get random point cloud surface points... this was used for Diffusion SDFs model
     if point_cloud is True:
         data['point_cloud'] = torch.from_numpy(data_['point_cloud']).float()
-
-    # get original points...
-    orig_pts= unpack_pts(data_, pts_name='orig_pts')
-    data['orig_pts'] = orig_pts
-    # get new points...
-    new_pts = unpack_pts(data_, pts_name='new_pts')
-    data['new_pts'] = new_pts
+    
+    for key in list_additional_keys:
+        key_data = unpack_pts(data_, pts_name=key)
+        data[key] = key_data
 
     return data
 
@@ -351,7 +365,7 @@ def read_meshes_get_sampled_pts(
         if os.path.exists(path) is False:
             print(f'Skipping ... path does not exist, {path}')
             return None
-        mesh = mskt.mesh.Mesh(path)
+        mesh = Mesh(path)
         # fixing meshes ensures they are not degenerate
         # degenerate meshes will cause issues fitting SDFs. 
         if fix_mesh is True:
@@ -466,7 +480,7 @@ def read_meshes_get_sampled_pts(
         for new_pts_idx, new_mesh_ in enumerate(new_meshes):
             if n_pts[new_pts_idx]  > 0:
                 if sigma[new_pts_idx] is not None:
-                    rand_pts_ = new_mesh_.rand_pts_around_surface(n_pts=n_pts[new_pts_idx], surface_method='bluenoise', distribution=rand_function, sigma=sigma[new_pts_idx])
+                    rand_pts_ = new_mesh_.rand_pts_around_surface(n_pts=n_pts[new_pts_idx], surface_method='random', distribution=rand_function, sigma=sigma[new_pts_idx])
                 else:
                     rand_pts_ = get_rand_uniform_pts(n_pts[new_pts_idx], mins=mins, maxs=maxs)
                 
@@ -558,7 +572,6 @@ class SDFSamples(torch.utils.data.Dataset):
         sigma_far (float, optional): Standard deviation/scale of the distribution for points further from the surface. Defaults to 0.1.
         rand_function (str, optional): Distribution to sample from. Defaults to 'normal'. Also supports 'laplace'.
         center_pts (bool, optional): Whether to center the points. Defaults to True.
-        axis_align (bool, optional): Whether to axis align the points. Defaults to False.
         norm_pts (bool, optional): Whether to normalize the points. Defaults to False.
         scale_method (str, optional): Method to scale the points. Defaults to 'max_rad'.
         loc_save (str, optional): Location to save the cached files. Defaults to os.environ['LOC_SDF_CACHE'].
@@ -590,7 +603,6 @@ class SDFSamples(torch.utils.data.Dataset):
         sigma_far=0.1,
         rand_function='normal', 
         center_pts=True,
-        axis_align=False,
         norm_pts=False,
         scale_method='max_rad',
         scale_jointly=False,
@@ -604,6 +616,11 @@ class SDFSamples(torch.utils.data.Dataset):
         equal_pos_neg=True,
         fix_mesh=True,
         print_filename=False,
+        multiprocessing=True,
+        n_processes=2,
+        store_data_in_memory=False,
+        debug_memory=False,
+
     ):
         self.list_mesh_paths = list_mesh_paths
         self.subsample = subsample
@@ -614,7 +631,6 @@ class SDFSamples(torch.utils.data.Dataset):
         self.sigma_far = sigma_far
         self.rand_function = rand_function
         self.center_pts = center_pts
-        self.axis_align = axis_align
         self.norm_pts = norm_pts
         self.scale_method = scale_method
         self.scale_jointly = scale_jointly
@@ -628,6 +644,12 @@ class SDFSamples(torch.utils.data.Dataset):
         self.load_cache = load_cache
         self.save_cache = save_cache
         self.print_filename = print_filename
+        self.multiprocessing = multiprocessing
+        self.n_processes = n_processes
+        self.store_data_in_memory = store_data_in_memory
+        self.debug_memory = debug_memory
+        self._memory_tracker = None
+        self._memory_counter = 0
 
         # set defaults so can use same 'norm_and_scale_all_meshes' function
         # for single and multiple meshes
@@ -650,23 +672,78 @@ class SDFSamples(torch.utils.data.Dataset):
 
         if self.reference_mesh is not None:
             self.load_reference_mesh()
+        
+        # preallocate reference mesh path to None
+        self.reference_mesh_path = None
+
+        # function to allow calling additional internal functions from subclasses. 
+        self.run_before_loading_data()
 
         self.data = []
-        for loc_mesh in list_mesh_paths:
-            if self.verbose is True:
-                print('Loading mesh:', loc_mesh)
-                
-            data = self.get_sample_data_dict(loc_mesh)
-            
-            if data is not None:
-                self.data.append(data)
-            else:
-                print('Skipping mesh:', loc_mesh)
-                print('Error in loading')
-        
+        # Wrap this loading loop in a multiprocessing pool
+        if self.multiprocessing is True:
+            list_inputs = [(loc_mesh, self.verbose) for loc_mesh in self.list_mesh_paths]
+            with Pool(processes=self.n_processes) as pool:
+                self.data = pool.starmap(self.load_mesh_step, list_inputs)
+        else:
+            self.data = [self.load_mesh_step(loc_mesh, self.verbose) for loc_mesh in self.list_mesh_paths]
+
+        # remove mesh paths that failed to load
+        self.list_mesh_paths = [x for idx, x in enumerate(self.list_mesh_paths) if self.data[idx] is not None]
+        # remove data that failed to load
+        self.data = [x for x in self.data if x is not None]
+
         if self.scale_jointly is True:
             self.norm_and_scale_all_meshes()
+        
     
+    def print_memory_summary(self):
+        if self._memory_tracker is None:
+            self._memory_tracker = tracker.SummaryTracker()
+        
+        # every 100th iteration, print the memory summary
+        if self._memory_counter % 100 == 0:
+            self._memory_tracker.print_diff()
+
+            # all_objects = muppy.get_objects()
+            # numpy_arrays = [obj for obj in all_objects if isinstance(obj, np.ndarray)]
+            # refs = gc.get_referrers(numpy_arrays[0])
+            # print('REFERENCES TO NUMPY ARRAY')
+            # print(refs)
+        # size_info = asizeof.asized(self, detail=1)
+        # print(size_info)
+        # all_objects = muppy.get_objects()
+        # memory_summary = summary.summarize(all_objects)
+        # if self._memory_summary is not None:
+        # self._memory_summary = memory_summary
+
+        self._memory_counter += 1
+
+    
+    def run_before_loading_data(self):
+        pass
+
+    def load_mesh_step(self, loc_mesh, verbose):
+        if verbose is True:
+            print('Loading mesh:', loc_mesh)
+        
+        if self.debug_memory is True:
+            self.print_memory_summary()
+        
+        data = self.get_sample_data_dict(loc_mesh)
+        
+        if data is None:
+            print('Skipping mesh:', loc_mesh)
+            print('Error in loading')
+        
+        if verbose is True:
+            print('Data type:', type(data))
+            print('Finished loading mesh:', loc_mesh)
+
+        gc.collect()
+
+        return data
+
     def norm_and_scale_all_meshes(self):
         """
         Normalize and scale all of the meshes.
@@ -732,7 +809,7 @@ class SDFSamples(torch.utils.data.Dataset):
             dict_pts[f'{pts_name}_{idx_}'] = orig_pts_
         return dict_pts
 
-    def save_data_to_cache(self, data, file_hash):
+    def save_data_to_cache(self, data, file_hash, filepath=None):
         """
         Save the data to the cache.
         
@@ -741,10 +818,19 @@ class SDFSamples(torch.utils.data.Dataset):
             file_hash (str): Hash of the file
         """
         # if want to cache, and new... then save. 
-        filepath = os.path.join(self.cache_folder, f'{file_hash}.npz')
+        if filepath is None:
+            filepath = os.path.join(self.cache_folder, f'{file_hash}.npz')
         dict_pts = {}
         dict_pts.update(self.get_dict_pts(data, 'orig_pts'))
         dict_pts.update(self.get_dict_pts(data, 'new_pts'))
+
+        additional_keys = ['pos_idx', 'neg_idx', 'surf_idx']
+        for key in additional_keys:
+            if key in data:
+                dict_pts.update(self.get_dict_pts(data, key))
+                # dict_pts[key] = data[key]
+
+        # add pos/negative point indices
 
         np.savez(filepath, pts=data['xyz'], sdfs=data['gt_sdf'], **dict_pts)
 
@@ -763,12 +849,35 @@ class SDFSamples(torch.utils.data.Dataset):
         file_hash = self.create_hash(loc_mesh)
         cached_file = self.find_hash(filename=f'{file_hash}.npz')
 
+        file_loaded = False
+
         if (len(cached_file) > 0) and (self.load_cache is True):
-            # if hashed file exists, load it. 
-            data_ = np.load(cached_file[0])
-            data = unpack_numpy_data(data_)
+            for cached_file_ in cached_file:
+                if not is_zipfile(cached_file_):
+                    print('DELETING BAD ZIP FILE:', cached_file_)
+                    os.remove(cached_file_)
+                    continue
+                
+                # if hashed file exists, load it. 
+                try:
+                    data_ = np.load(cached_file_)
+                    data = unpack_numpy_data(data_)
+                except zipfile.BadZipFile:
+                    print('DELETING BAD ZIP FILE:', cached_file_)
+                    os.remove(cached_file_)
+                    continue
+                
+                if ('pos_idx' not in data) or ('neg_idx' not in data) or ('surf_idx' not in data):
+                    pos_idx, neg_idx, surf_idx = self.sdf_pos_neg_idx(data)
+                    data['pos_idx'] = pos_idx
+                    data['neg_idx'] = neg_idx
+                    data['surf_idx'] = surf_idx
+                    self.save_data_to_cache(data, file_hash, filepath=cached_file_)
+                
+                file_loaded = True
+                break
             
-        else:
+        if file_loaded is False:
             # otherwise, load the mesh and create SDF samples. 
             print('Creating SDF Samples')
             if  self.print_filename is True:
@@ -778,6 +887,15 @@ class SDFSamples(torch.utils.data.Dataset):
                 'gt_sdf': torch.zeros((self.n_pts)),
             }
             pts_idx = 0
+
+            if self.multiprocessing is True:
+                if self.reference_mesh_path is not None:
+                    reference_mesh = Mesh(self.reference_mesh_path)
+                else:
+                    reference_mesh = None
+            else:
+                reference_mesh = self.reference_mesh
+
             for idx_, (n_pts_, sigma_) in enumerate(self.pt_sample_combos):
                 result_ = read_mesh_get_sampled_pts(
                     loc_mesh, 
@@ -792,8 +910,8 @@ class SDFSamples(torch.utils.data.Dataset):
                     return_orig_mesh=False,
                     return_new_mesh=False,
                     fix_mesh=self.fix_mesh,
-                    register_to_mean_first=False if self.reference_mesh is None else True,
-                    mean_mesh=self.reference_mesh,
+                    register_to_mean_first=False if reference_mesh is None else True,
+                    mean_mesh=reference_mesh,
                 )
 
                 if result_ is None:
@@ -810,13 +928,15 @@ class SDFSamples(torch.utils.data.Dataset):
                     data['orig_pts'] = torch.from_numpy(result_['orig_pts']).float()
                     data['new_pts'] = torch.from_numpy(result_['new_pts']).float()
 
+            pos_idx, neg_idx, surf_idx = self.sdf_pos_neg_idx(data)
+            data['pos_idx'] = pos_idx
+            data['neg_idx'] = neg_idx
+            data['surf_idx'] = surf_idx
+
             if self.save_cache is True:
                 self.save_data_to_cache(data, file_hash)
 
-        pos_idx, neg_idx, surf_idx = self.sdf_pos_neg_idx(data)
-        data['pos_idx'] = pos_idx
-        data['neg_idx'] = neg_idx
-        data['surf_idx'] = surf_idx
+        
 
         return data
     
@@ -891,26 +1011,31 @@ class SDFSamples(torch.utils.data.Dataset):
             TypeError: If reference mesh is not a string, list of strings, or mesh.Mesh object
         """
 
-        if issubclass(type(self.reference_mesh), mskt.mesh.Mesh):
+        if issubclass(type(self.reference_mesh), Mesh):
             pass
         elif isinstance(self.reference_mesh, int):
-            if isinstance(self.list_mesh_paths[0], (str, mskt.mesh.Mesh)):
+            if isinstance(self.list_mesh_paths[0], (str, Mesh)):
                 mesh = self.list_mesh_paths[self.reference_mesh]
             elif isinstance(self.list_mesh_paths[0], (list, tuple)):
                 
                 mesh = self.list_mesh_paths[self.reference_mesh][self.mesh_to_scale]
             else:
                 raise TypeError('provided list_meshes wrong type')
-            self.reference_mesh = mskt.mesh.Mesh(mesh)
+            self.reference_mesh = Mesh(mesh)
         elif isinstance(self.reference_mesh, str):
-            self.reference_mesh = mskt.mesh.Mesh(self.reference_mesh)
+            self.reference_mesh = Mesh(self.reference_mesh)
         elif isinstance(self.reference_mesh, list):
             # below will throw error in SDFSamples, but will work in MultiSurfaceSDFSamples
             # where self.mesh_to_scale is defined & a list/tuple type likely
             # TODO: Why is reference_object different from mesh_to_scale?
-            self.reference_mesh = mskt.mesh.Mesh(self.reference_mesh[self.reference_object])
+            self.reference_mesh = Mesh(self.reference_mesh[self.reference_object])
         else:
             raise TypeError('Reference mesh must be a string, list of strings, or mesh.Mesh object, not', type(self.reference_mesh))
+
+        if self.multiprocessing is True:
+            self.reference_mesh_path = os.path.join(self.cache_folder, f'REFERENCE_MESH_{int(np.random.rand() * 1000000000)}.vtk')
+            self.reference_mesh.save_mesh(self.reference_mesh_path)
+            self.reference_mesh = None
 
     def get_hash_params(self):
         """
@@ -925,7 +1050,6 @@ class SDFSamples(torch.utils.data.Dataset):
             self.p_near_surface, self.sigma_near,
             self.p_further_from_surface, self.sigma_far,
             self.center_pts,
-            self.axis_align,
             self.norm_pts,
             self.scale_method,
             self.rand_function,
@@ -986,7 +1110,21 @@ class SDFSamples(torch.utils.data.Dataset):
             dict: Dictionary of the item
             idx (int): Index of the item
         """
-        data_ = self.data[idx]
+
+        if self.store_data_in_memory is False:
+            # if not storing in memory, then load from cache
+            data_ = np.load(self.data[idx])
+            if self.equal_pos_neg is True:
+                list_keys_unpack = ['pos_idx', 'neg_idx']
+            else:
+                list_keys_unpack = []
+            data_ = unpack_numpy_data(data_, list_additional_keys=list_keys_unpack)
+        elif self.store_data_in_memory is True:
+            # if storing in memory, then just get the data
+            data_ = self.data[idx]
+        else:
+            raise ValueError('store_data_in_memory must be True or False')
+
         if self.subsample is not None:
             if self.equal_pos_neg is True:
                 samples_per_sign = int(self.subsample/2)
@@ -1033,7 +1171,6 @@ class MultiSurfaceSDFSamples(SDFSamples):
         sigma_far=0.1,
         rand_function='normal', 
         center_pts=True,
-        axis_align=False,
         norm_pts=False,
         scale_method='max_rad',
         scale_jointly=False,
@@ -1052,7 +1189,11 @@ class MultiSurfaceSDFSamples(SDFSamples):
         scale_all_meshes=True,                  
         center_all_meshes=False,                
         mesh_to_scale=0,
-        reference_object=0,                   
+        reference_object=0,
+        store_data_in_memory=False,
+        multiprocessing=True,     
+        debug_memory=False,
+        n_processes=2,    
     ):
         # Multi surface specific
         self.mesh_to_scale = mesh_to_scale
@@ -1072,7 +1213,6 @@ class MultiSurfaceSDFSamples(SDFSamples):
             sigma_far=sigma_far,
             rand_function=rand_function,
             center_pts=center_pts,
-            axis_align=axis_align,
             norm_pts=norm_pts,
             scale_method=scale_method,
             scale_jointly=scale_jointly,
@@ -1086,6 +1226,10 @@ class MultiSurfaceSDFSamples(SDFSamples):
             equal_pos_neg=equal_pos_neg,
             fix_mesh=fix_mesh,
             print_filename=print_filename,
+            store_data_in_memory=store_data_in_memory,
+            multiprocessing=multiprocessing,
+            n_processes=n_processes,
+            debug_memory=debug_memory,
         )
     
     def preprocess_inputs(self):
@@ -1093,7 +1237,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
 
         if isinstance(self.list_mesh_paths[0], (list, tuple)):
             self.n_meshes = len(self.list_mesh_paths[0])
-        elif isinstance(self.list_mesh_paths[0], (str, mskt.mesh.Mesh)):
+        elif isinstance(self.list_mesh_paths[0], (str, Mesh)):
             self.n_meshes = len(self.list_mesh_paths)
         
         if not isinstance(self.p_near_surface, (list, int)):
@@ -1107,20 +1251,89 @@ class MultiSurfaceSDFSamples(SDFSamples):
         if not isinstance(self.n_pts, (list, int)):
             self.n_pts = [self.n_pts] * self.n_meshes
     
+    def run_before_loading_data(self):
+        self.get_samples_per_sign()
+    
+    def test_if_idx_in_range(self, data):
+        n_pts = data['xyz'].shape[0]
+        
+        for name in ['pos_idx', 'neg_idx']:
+            indices = data[name]
+            max_idx = 0
+            for tensor in indices:
+                max_idx = torch.max(tensor)
+                if max_idx >= n_pts:
+                    return False
+        
+        return True
+                
     def get_sample_data_dict(self, loc_meshes):
         if type(loc_meshes) not in (tuple, list):
             loc_meshes = [loc_meshes]
         
+        with open(os.path.join(self.loc_save,'list_meshes_started_loading.log'), 'a') as f:
+            f.write(str(loc_meshes) + '\n')
+        
+        # get the number of points to sample per mesh / sign(in/out or pos/neg)
+        self.get_samples_per_sign()
+        
         # Create hash and filename 
         file_hash = self.create_hash(loc_meshes)
         cached_file = self.find_hash(filename=f'{file_hash}.npz')
-        
+
+        file_loaded = False
+
         if (len(cached_file) > 0) and (self.load_cache is True):
-            # if hashed file exists, load it. 
-            data_ = np.load(cached_file[0])
-            data = unpack_numpy_data(data_)
+            for cache_path in cached_file:
+                if not is_zipfile(cache_path):
+                    print('DELETEING BAD ZIP FILE:', cache_path)
+                    os.remove(cache_path)
+                    continue
+                
+                try:
+                    data = np.load(cache_path)
+                    data = unpack_numpy_data(data)
+                except zipfile.BadZipFile:
+                    print('DELETEING BAD ZIP FILE:', cache_path)
+                    os.remove(cache_path)
+                    continue
+
+                # if previous pre-processing not yet done, do it now 
+                # and update/resave the data to cache. 
+                resave_data = False
+
+                data, in_in = self.remove_overlapping_points(data)
+
+                if in_in > 0:
+                    resave_data = True
+
+                if (
+                        ('pos_idx' not in data) or (len(data['pos_idx']) != self.n_meshes) 
+                        or ('neg_idx' not in data) or (len(data['neg_idx']) != self.n_meshes)
+                        or ('surf_idx' not in data) or (len(data['surf_idx']) != self.n_meshes)
+                    ):
+                    print('getting pos/neg')
+                    pos_idx, neg_idx, surf_idx = self.sdf_pos_neg_idx(data)
+                    data['pos_idx'] = pos_idx
+                    data['neg_idx'] = neg_idx
+                    data['surf_idx'] = surf_idx
+
+                    resave_data = True
+                
+                if self.test_if_idx_in_range(data) is False:
+                    print('Indices out of range!', cache_path)
+                    print('\tDeleting file...')
+                    os.remove(cache_path)
+                    break
+
+                if resave_data is True:
+                    self.save_data_to_cache(data, file_hash, filepath=cache_path) #resave data to cache - overwriting original. 
+                
+                file_loaded = True
+                #TODO: crat
+                break
             
-        else:
+        if file_loaded is False:
             # otherwise, load the mesh and create SDF samples. 
             print('Creating SDF Samples')
             if self.print_filename is True:
@@ -1132,6 +1345,15 @@ class MultiSurfaceSDFSamples(SDFSamples):
             }
             pts_idx = 0
             icp_transform = None
+
+            if self.multiprocessing is True:
+                if self.reference_mesh_path is not None:
+                    reference_mesh = Mesh(self.reference_mesh_path)
+                else:
+                    reference_mesh = None
+            else:
+                reference_mesh = self.reference_mesh
+
             for idx_, (n_pts_, sigma_) in enumerate(self.pt_sample_combos):
                 tic = time.time()
                 result_ = read_meshes_get_sampled_pts(
@@ -1145,8 +1367,8 @@ class MultiSurfaceSDFSamples(SDFSamples):
                     scale_method=self.scale_method,
                     get_random=True,
                     fix_mesh=self.fix_mesh,
-                    register_to_mean_first=False if self.reference_mesh is None else True,  #
-                    mean_mesh=self.reference_mesh,  # 
+                    register_to_mean_first=False if reference_mesh is None else True,  #
+                    mean_mesh=reference_mesh,  # 
                     
                     # Multi surface specific
                     mesh_to_scale=self.mesh_to_scale,
@@ -1177,41 +1399,63 @@ class MultiSurfaceSDFSamples(SDFSamples):
                     data['gt_sdf'][pts_idx:pts_idx + sum(n_pts_), mesh_idx] = torch.from_numpy(_sdfs_).float()
                 pts_idx += sum(n_pts_)
             
-            if (data is not None) and (self.save_cache is True):
-                self.save_data_to_cache(data, file_hash)
-        
-        # Drop points that have are labeled as being inside
-        # 2 objects - clearly this is an error. 
-        if data['gt_sdf'].shape[1] == 2:
-            sdf_ = data['gt_sdf'].clone()
-            sdf_[sdf_ < 0] = -1
-            sdf_[sdf_ > 0] = 1
-            sdf_[sdf_ == 0] = 0
-            total = torch.sum(sdf_, axis=1)
+            # Drop points that have are labeled as being inside
+            # 2 objects - clearly this is an error.
+            data, in_in = self.remove_overlapping_points(data)
 
-            out_out = torch.sum(total == 2)
-            out_in = torch.sum(total == 0)
-            in_in = torch.sum(total == -2)
-
-            # Drop overlapping points
-            data['gt_sdf'] = data['gt_sdf'][total != -2, :]
-            data['xyz'] = data['xyz'][total != -2, :]
-
-
-            if self.verbose is True:
-                print('total shape', total.shape)
-                print('total', total)
-                print('out_out', out_out)
-                print('out_in', out_in)
-                print('in_in', in_in)
-
-        if self.equal_pos_neg is True:
+            print('getting pos/neg')
             pos_idx, neg_idx, surf_idx = self.sdf_pos_neg_idx(data)
             data['pos_idx'] = pos_idx
             data['neg_idx'] = neg_idx
             data['surf_idx'] = surf_idx
-
+            
+            if (data is not None) and (self.save_cache is True):
+                self.save_data_to_cache(data, file_hash)
+                cache_path = os.path.join(self.cache_folder, f'{file_hash}.npz')
+        
+        if self.store_data_in_memory is False:
+            if self.verbose is True:
+                print('updating data to be cache path')
+            # change the data to be the path to the saved cache file
+            data = cache_path
+            
         return data
+
+    def get_samples_per_sign(self):
+        samples_per_mesh = [int((n_pts_/self.total_n_pts) * self.subsample) for n_pts_ in self.n_pts]
+
+        # setup samples per sign 
+        self.samples_per_sign_ = []
+        for subsample_ in samples_per_mesh:
+            samples_per_sign = int(subsample_/2)
+            if self.verbose is True:
+                print(samples_per_sign)
+            self.samples_per_sign_.append(samples_per_sign)
+
+    def remove_overlapping_points(self, data):
+        sdf_ = data['gt_sdf'].clone()
+        sdf_[sdf_ < 0] = -1
+        sdf_[sdf_ > 0] = 1
+        sdf_[sdf_ == 0] = 0
+        total = torch.sum(sdf_, axis=1)
+
+        out_out = torch.sum(total == 2)
+        out_in = torch.sum(total == 0)
+        in_in = torch.sum(total == -2)
+
+        # Drop overlapping points
+        data['gt_sdf'] = data['gt_sdf'][total != -2, :]
+        data['xyz'] = data['xyz'][total != -2, :]
+
+
+        if self.verbose is True:
+            print('total shape', total.shape)
+            print('total', total)
+            print('out_out', out_out)
+            print('out_in', out_in)
+            print('in_in', in_in)
+        
+        return data, in_in
 
     def get_pt_sample_combos(self):
         n_p_near_surface = [int(n_pts_ * p_near) for n_pts_, p_near in zip(self.n_pts, self.p_near_surface)]
@@ -1229,7 +1473,6 @@ class MultiSurfaceSDFSamples(SDFSamples):
     def get_hash_params(self):
         list_hash_params = [
             self.center_pts,
-            self.axis_align,
             self.norm_pts,
             self.scale_method,
             self.rand_function,
@@ -1265,8 +1508,6 @@ class MultiSurfaceSDFSamples(SDFSamples):
         - return list of indices
         '''
 
-        self.samples_per_mesh = [int((n_pts_/self.total_n_pts) * self.subsample) for n_pts_ in self.n_pts]
-
         pos_idx = []
         neg_idx = []
         surf_idx = []
@@ -1274,12 +1515,9 @@ class MultiSurfaceSDFSamples(SDFSamples):
         if self.verbose is True:
             print('data', data['xyz'].shape, data['gt_sdf'].shape)
         
-        self.samples_per_sign = []
-        for mesh_idx, subsample_ in enumerate(self.samples_per_mesh):
+        for mesh_idx in range(self.n_meshes):
             
-            samples_per_sign = int(subsample_/2)
-            print(samples_per_sign)
-            self.samples_per_sign.append(samples_per_sign)
+            samples_per_sign = self.samples_per_sign_[mesh_idx]
 
             # BELOW NEEDS LOGIC TO UNPACK  1/2 pos/neg pts for each mesh
             # mesh_sdfs = data['gt_sdf'][pts_idx_:pts_idx_ + n_pts_, mesh_idx]
@@ -1288,30 +1526,38 @@ class MultiSurfaceSDFSamples(SDFSamples):
             neg_idx_ = (mesh_sdfs < 0).nonzero(as_tuple=True)[0] #+ pts_idx_
             surf_idx_ = (mesh_sdfs == 0).nonzero(as_tuple=True)[0] #+ pts_idx_
 
-            # print('pre repeat:')
-            # print('pos_idx_', pos_idx_.shape)
-            # print('neg_idx_', neg_idx_.shape)
-
             # Repeat +/- indices if either of them does not have enough for a full batch. 
             pos_idx_ = pos_idx_.repeat(samples_per_sign//pos_idx_.size(0) + 1)
             neg_idx_ = neg_idx_.repeat(samples_per_sign//neg_idx_.size(0) + 1)
 
-            # print('pos_idx_', pos_idx_.shape)
-            # print('neg_idx_', neg_idx_.shape)
-
             pos_idx.append(pos_idx_)
             neg_idx.append(neg_idx_)
             surf_idx.append(surf_idx_)
-        
+                
         return pos_idx, neg_idx, surf_idx
-
+    
     def __getitem__(self, idx):
         #TODO: get rid of pts_array from above
         # replace with self.data[idx] = [pts, sdfs_]
         # this will simplify everything downstream because this is something that we are
         # constantly undoing/re-doing elsewhere in the code - and it even lookts like
         # the sdfs/pts are stroed separately in the npy files. 
-        data_ = self.data[idx]
+
+        if self.store_data_in_memory is False:
+            # if not storing in memory, then load from cache
+            data_ = np.load(self.data[idx])
+            if self.equal_pos_neg is True:
+                list_keys_unpack = ['pos_idx', 'neg_idx']
+            else:
+                list_keys_unpack = []
+            data_ = unpack_numpy_data(data_, list_additional_keys=list_keys_unpack)
+
+        elif self.store_data_in_memory is True:
+            # if storing in memory, then just get the data
+            data_ = self.data[idx]
+        else:
+            raise ValueError('store_data_in_memory must be True or False')
+
         if self.subsample is not None:
             if self.equal_pos_neg is True:
                 # get number of points for each mesh
@@ -1319,14 +1565,17 @@ class MultiSurfaceSDFSamples(SDFSamples):
                 # relative to the total number of points in the dataset
                 # samples_per_mesh = [int((n_pts_/self.total_n_pts) * self.subsample) for n_pts_ in self.n_pts]
                 idx_ = []
-                for mesh_idx, samples_per_sign in enumerate(self.samples_per_sign):
+                for mesh_idx, samples_per_sign in enumerate(self.samples_per_sign_):
                     # get number of positive and negative points for this mesh
                     # samples_per_sign = int(subsample_/2)
                     if self.verbose is True:
                         print('samples_per_sign', samples_per_sign)
+                        print('mesh idx', mesh_idx)
+                        print('data_ pos', data_['pos_idx'])
                     
                     if samples_per_sign == 0:
                         continue
+
                     # get random indices for positive and negative points
                     # idx_pos = data_['pos_idx'][mesh_idx].repeat(data_['pos_idx'][mesh_idx].size(0)//samples_per_sign + 1)
                     perm_pos = torch.randperm(data_['pos_idx'][mesh_idx].size(0))[:samples_per_sign]
