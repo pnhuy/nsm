@@ -3,9 +3,9 @@ from pymskt.mesh import BoneMesh, CartilageMesh
 from scipy.stats import entropy
 
 CART_REGIONS = (
-    2, # med tib
-    3, # lat tib
-    4, # pat
+    # 2, # med tib
+    # 3, # lat tib
+    # 4, # pat
     11, # troch
     12, # med wb fem
     13, # lat wb fem
@@ -69,15 +69,17 @@ def compare_cart_thickness(
         recon_std = recon_bone.get_cart_thickness_std(cart_region)
         std_diff = orig_std - recon_std
 
-        dict_results[f'func_{cart_region}_mean_thick_diff'] = mean_diff
-        dict_results[f'func_{cart_region}_std_thick_diff'] = std_diff
+        dict_results[f'func_cart_thick_{cart_region}_orig_mean'] = orig_mean
+        dict_results[f'func_cart_thick_{cart_region}_recon_mean'] = recon_mean
+        dict_results[f'func_cart_thick_{cart_region}_mean_thick_diff'] = mean_diff
+        dict_results[f'func_cart_thick_{cart_region}_std_thick_diff'] = std_diff
 
     orig_array = orig_bone.get_scalar('thickness (mm)')
     recon_array = recon_bone.get_scalar('thickness (mm)')
 
-    # Compute KL divergence between two distributions
-    thickness_kld = entropy(orig_array, qk=recon_array)
+    # # Compute KL divergence between two distributions
+    # thickness_kld = entropy(orig_array, qk=recon_array)
     
-    dict_results['func_thickness_kld'] = thickness_kld
+    # dict_results['func_thickness_kld'] = thickness_kld
 
     return dict_results
