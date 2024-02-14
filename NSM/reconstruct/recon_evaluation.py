@@ -7,12 +7,13 @@ except:
     print('Error importing `sinkhorn` from NSM.dependencies')
     __emd__ = False
 
-from .utils import compute_chamfer, compute_assd
+from .utils import compute_chamfer #, compute_assd
 
 
 def compute_recon_loss(
     meshes,
-    orig_pts,
+    # orig_pts,
+    orig_meshes,
     n_samples_chamfer=None,
     n_samples_assd=None,
     chamfer_norm=1,
@@ -39,10 +40,10 @@ def compute_recon_loss(
 
     if not isinstance(meshes, list):
         meshes = [meshes]
-    if not isinstance(orig_pts, list):
-        orig_pts = [orig_pts]
-
-    assert len(meshes) == len(orig_pts), 'Number of meshes and number of original points must be equal'
+    if not isinstance(orig_meshes, list):
+        orig_meshes = [orig_meshes]
+    
+    assert len(meshes) == len(orig_meshes), 'Number of meshes and number of original points must be equal'
 
     for mesh_idx, mesh in enumerate(meshes):
         if mesh is not None:
@@ -50,7 +51,7 @@ def compute_recon_loss(
         else:
             pts_recon_ = None
 
-        xyz_orig_ = orig_pts[mesh_idx]
+        xyz_orig_ = orig_meshes[mesh_idx].point_coords
         
         if calc_symmetric_chamfer:
             # if __chamfer__ is True:
@@ -71,11 +72,11 @@ def compute_recon_loss(
             if pts_recon_ is None:
                 assd_loss_ = np.nan
             else:
-                assd_loss_ = compute_assd(
-                    xyz_orig_,
-                    pts_recon_,
-                    num_samples=n_samples_assd,
-                )
+                assd_loss_ = mesh.get_assd_mesh(orig_meshes[mesh_idx])
+                #     xyz_orig_,
+                #     pts_recon_,
+                #     num_samples=n_samples_assd,
+                # )
             result[f'assd_{mesh_idx}'] = assd_loss_
         
         if calc_emd:

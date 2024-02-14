@@ -10,13 +10,9 @@ from .predictive_validation_class import Regress
 
 from NSM.datasets import (
     read_mesh_get_sampled_pts, 
-    get_pts_center_and_scale,
     read_meshes_get_sampled_pts
 )
 from NSM.mesh import create_mesh
-
-from .reconstruct_latent_S3 import reconstruct_latent_S3
-from .reconstruct_diffusion_sdf import reconstruct_mesh_diffusion_sdf
 
 import numpy as np
 import sys
@@ -25,6 +21,7 @@ import copy
 import pymskt as mskt
 import wandb
 import time
+from fnmatch import fnmatch
 
 try:
     from NSM.dependencies import sinkhorn
@@ -349,13 +346,11 @@ def reconstruct_mesh(
     calc_symmetric_chamfer=False,
     calc_assd=False,
     calc_emd=False,
-    return_unscaled=True,
     n_pts_per_axis=256,
     log_wandb=False,
     return_latent=False,
     convergence='num_iterations',
     convergence_patience=50,
-    fit_similarity=False,
     scale_jointly=False,
     register_similarity=False,
     n_pts_per_axis_mean_mesh=128,
@@ -376,6 +371,7 @@ def reconstruct_mesh(
     difficulty_weight_recon=None,
     chamfer_norm=2,
     func=None,
+    fix_mesh=True,
 ):
     """
     Reconstructs mesh at path using decoders. 
@@ -413,9 +409,6 @@ def reconstruct_mesh(
         objects_per_decoder = [objects_per_decoder,] * len(decoders)
 
     tic = time.time()
-
-    if (fit_similarity is True) and (register_similarity is True):
-        raise ValueError('Cannot fit similarity and register similarity at the same time')
     
     if (scale_jointly) or (register_similarity is True):
         # if register first, then register new mesh to the mean of the decoder (zero latent vector)
@@ -475,7 +468,8 @@ def reconstruct_mesh(
             register_to_mean_first=True if register_similarity else False,
             mean_mesh=mean_mesh if register_similarity else None,
             n_pts_random=n_pts_random,
-            include_surf_in_pts=get_rand_pts
+            include_surf_in_pts=get_rand_pts,
+            fix_mesh=fix_mesh,
         )
     elif multi_object is True:
         result_ = read_meshes_get_sampled_pts(
@@ -491,7 +485,8 @@ def reconstruct_mesh(
             register_to_mean_first=True if register_similarity else False,
             mean_mesh=mean_mesh,
             n_pts_random=n_pts_random,
-            include_surf_in_pts=get_rand_pts
+            include_surf_in_pts=get_rand_pts,
+            fix_mesh=fix_mesh,
         )
     else:
         raise ValueError('multi_object must be True or False')
@@ -547,39 +542,17 @@ def reconstruct_mesh(
         'convergence': convergence,
         'convergence_patience': convergence_patience,
         'verbose': verbose,
+        'max_batch_size': batch_size_latent_recon,
+        'optimizer_name': latent_optimizer_name,
+        'n_samples': n_samples_latent_recon,
+        'difficulty_weight': difficulty_weight_recon,
+        'pts_surface': pts_surface,
+        'max_n_samples': max_n_samples_latent_recon, 
+        'n_steps_sample_ramp': n_steps_sample_ramp_latent_recon
     }
 
-    # specify latent recon functions, and extra parameters if needed
-    if fit_similarity is False:
-        reconstruct_function = reconstruct_latent
-        recon_params_ = {
-            'max_batch_size': batch_size_latent_recon,
-            'optimizer_name': latent_optimizer_name,
-            'n_samples': n_samples_latent_recon,
-            'difficulty_weight': difficulty_weight_recon,
-            'pts_surface': pts_surface,
-            'max_n_samples': max_n_samples_latent_recon, 
-            'n_steps_sample_ramp': n_steps_sample_ramp_latent_recon
-        }
- 
-    elif fit_similarity is True:
-        reconstruct_function = reconstruct_latent_S3
-        recon_params_ = {
-            'soft_contrain_scale': True,
-            'scale_constrain_deviation': 0.05,
-            'soft_constrain_theta': True,
-            'theta_constrain_deviation': torch.pi/36,
-            'soft_constrain_translation': True,
-            'translation_constrain_deviation': 0.05,
-            'init_scale_method': 'max_rad',
-            'transform_update_patience': 500
-        }
-    else:
-        raise ValueError('fit_similarity must be True or False')
 
-    reconstruct_inputs.update(recon_params_)
-
-    loss, latent = reconstruct_function(**reconstruct_inputs)
+    loss, latent = reconstruct_latent(**reconstruct_inputs)
 
     toc = time.time()
     time_recon_latent = toc - tic
@@ -587,18 +560,6 @@ def reconstruct_mesh(
         print(f'Reconstructed latent in {time_recon_latent:.2f} seconds')
     tic = time.time()
 
-    # if fit_similarity is True, then set transform parameters
-    # for reconstructed mesh from the returned latent
-    if fit_similarity is True:
-        R = latent['R']
-        t = latent['t']
-        s = latent['s']
-        latent = latent['latent']
-
-    else:
-        R = None
-        t = None
-        s = None
 
     if verbose is True:
         print(result_['icp_transform'])
@@ -616,9 +577,6 @@ def reconstruct_mesh(
             offset=result_['center'],
             scale=result_['scale'],
             icp_transform=result_['icp_transform'],
-            R=R,
-            t=t,
-            s=s,
             objects=objects_per_decoder[decoder_idx],
             verbose=verbose,
         )
@@ -636,7 +594,7 @@ def reconstruct_mesh(
     tic = time.time()
     
     if func is not None:
-        func_results = func(orig_mesh=result_['orig_mesh'], recon_meshes=meshes)
+        func_results = func(result_['orig_mesh'], meshes) # original result, then reconstruction.
 
     toc = time.time()
     time_calc_recon_funcs = toc - tic
@@ -646,11 +604,13 @@ def reconstruct_mesh(
 
     if calc_emd or calc_symmetric_chamfer or calc_assd or return_latent or (func is not None):
         result = {'mesh': meshes}
+        result['orig_mesh'] = result_['orig_mesh']
 
         if calc_emd or calc_symmetric_chamfer or calc_assd:
             result_ = compute_recon_loss(
                 meshes=meshes,
-                orig_pts=result_['orig_pts'],
+                orig_meshes=result_['orig_mesh'],
+                # orig_pts=result_['orig_pts'],
                 n_samples_chamfer=n_samples_chamfer,
                 chamfer_norm=chamfer_norm,
                 calc_symmetric_chamfer=calc_symmetric_chamfer,
@@ -689,18 +649,8 @@ def tune_reconstruction(
     """
     if use_wandb is True:
         wandb.login(key=os.environ['WANDB_KEY'])
-        # wandb.init(
-        #     # Set the project where this run will be logged
-        #     project=config["project_name"], # "diffusion-net-predict-sex",
-        #     entity=config["entity_name"], # "bone-modeling",
-        #     # Track hyperparameters and run metadata
-        #     config=config,
-        #     name=config['run_name'],
-        #     tags=config['tags']
-        # )
-
     
-    dict_loss = get_mean_errors(
+    get_mean_errors(
         mesh_paths=config['mesh_paths'],
         decoders=model,
         num_iterations=config['num_iterations'],
@@ -760,11 +710,8 @@ def get_mean_errors(
     register_similarity=False,
     scale_all_meshes=True,
     model_type='deepsdf',
-    point_cloud_size=1024,
     verbose=False,
     objects_per_decoder=1,
-    mesh_to_scale=0,
-    decoder_to_scale=0,
     batch_size_latent_recon=3*10**4,
     latent_optimizer_name='adam',
     get_rand_pts=False,
@@ -779,6 +726,7 @@ def get_mean_errors(
     predict_val_variables=None,
 
     scale_jointly=False,
+    fix_mesh=True,
 ):
     """
     Reconstruct meshes & compute errors    
@@ -829,18 +777,11 @@ def get_mean_errors(
             'difficulty_weight_recon': difficulty_weight_recon,
             'chamfer_norm': chamfer_norm,
             'func': recon_func,
+            'fix_mesh': fix_mesh,
             
         }
 
         recon_fx = reconstruct_mesh
-    elif model_type == 'diffusion':
-        reconstruct_inputs_ = {
-            'model': decoders,
-            'n_encode_iterations': num_iterations,
-            'point_cloud_size': point_cloud_size,
-            'scale_to_original_mesh': True,
-        }
-        recon_fx = reconstruct_mesh_diffusion_sdf
     else:
         raise ValueError(f'model_type must be either "deepsdf" or "diffusion"m received {model_type}')
 
@@ -911,14 +852,36 @@ def get_mean_errors(
         loss_.update(predictive_results)
         
     for key, item in loss.items():
+        print(key, item)
         mean = np.mean(item)
         std = np.std(item)
         median = np.median(item)
-        hist = wandb.Histogram(item)
+        try:
+            hist = wandb.Histogram(item)
+        except ValueError:
+            hist = None
         loss_[key] = mean
         loss_[f'{key}_std'] = std
         loss_[f'{key}_mean'] = mean
         loss_[f'{key}_median'] = median
         loss_[f'{key}_hist'] = hist
 
+        if fnmatch(key, 'cart_thick*_orig_mean'):
+            cart_region = key.split('_')[2]
+            loss_[f'cart_thick_{cart_region}_corr'] = np.corrcoef(
+                loss[f'cart_thick_{cart_region}_orig_mean'],
+                loss[f'cart_thick_{cart_region}_recon_mean']
+            )[0,1]
+        if fnmatch(key, 'cart_thick*_mean_thick_diff'):
+            cart_region = key.split('_')[2]
+            loss_[f'cart_thick_{cart_region}_RMSE'] = np.sqrt(np.mean(np.square(loss[f'cart_thick_{cart_region}_mean_thick_diff'])))
+
     return loss_
+
+def compute_correlation_coefficient(x, y):
+    """
+    Compute correlation coefficient between x and y.
+    """
+    x = np.array(x)
+    y = np.array(y)
+    return np.corrcoef(x, y)[0,1]
