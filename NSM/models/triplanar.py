@@ -160,7 +160,8 @@ class TriplanarDecoder(nn.Module):
         sdf_dropout_prob=0.,
         sum_sdf_features=True,
         conv_pred_sdf=False,
-        padding=0.1
+        padding=0.1,
+        **kwargs
     ):
         super(TriplanarDecoder, self).__init__()
         

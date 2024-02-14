@@ -63,13 +63,6 @@ def scale_mesh(
     mesh = scale_mesh_(new_mesh, scale=scale, offset=offset, icp_transform=icp_transform, verbose=verbose)
     return mesh
 
-def apply_similarity_transform(mesh, R, t, s):
-    pts = mskt.mesh.get_mesh_physical_point_coords(mesh)
-    pts += t
-    pts = pts * s
-    pts = (R @ pts.T).T
-    mskt.mesh.meshTools.set_mesh_physical_point_coords(mesh, pts)
-
 def create_mesh(
     decoder,
     latent_vector,
@@ -83,9 +76,6 @@ def create_mesh(
     filename='mesh_{mesh_idx}.vtk',
     path_original_mesh=None,
     scale_to_original_mesh=True,
-    R=None,
-    t=None,
-    s=None,
     icp_transform=None,
     objects=1,
     verbose=False
@@ -125,12 +115,7 @@ def create_mesh(
             mesh = sdf_grid_to_mesh(sdf_values_, voxel_origin, voxel_size)
             meshes.append(mesh)
 
-            # apply scaling/transformation to mesh
-            if (R is True) & (s is True) & (t is True):
-                # for mesh in meshes:
-                apply_similarity_transform(meshes[mesh_idx], R, t, s)
-
-            elif scale_to_original_mesh:
+            if scale_to_original_mesh:
                 if verbose is True:
                     print('Scaling mesh to original mesh... ')
                     print(icp_transform)
