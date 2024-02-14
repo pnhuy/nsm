@@ -3,6 +3,7 @@ from NSM.utils import (
     adjust_learning_rate, 
     save_latent_vectors,
     save_model,
+    save_model_params,
     get_optimizer,
     get_latent_vecs,
     get_checkpoints,
@@ -80,6 +81,9 @@ def train_deep_sdf(
             log_dict = train_epoch(model, data_loader, latent_vecs, optimizer=optimizer, config=config, epoch=epoch, return_loss=True)
             
             if epoch in config['checkpoints']:
+
+                save_model_params(config=config, list_mesh_paths=sdf_dataset.list_mesh_paths)
+
                 save_latent_vectors(
                     config=config,
                     epoch=epoch,
@@ -133,6 +137,7 @@ def train_deep_sdf(
                         predict_val_variables=None if ('predict_val_variables' not in config) else config['predict_val_variables'],
 
                         scale_jointly=config['scale_jointly'],
+                        fix_mesh=config['fix_mesh_recon'],
                     )
 
                     log_dict.update(dict_loss)
@@ -141,6 +146,8 @@ def train_deep_sdf(
                 wandb.log(log_dict)
             
             profiler.step()
+
+            torch.cuda.empty_cache()
         
     return
 
@@ -190,8 +197,8 @@ def train_epoch(
             sdf_gt_ = sdf_data['gt_sdf'][:, :, surf_idx].reshape(-1, 1)
             if config['enforce_minmax'] is True:
                 sdf_gt_ = torch.clamp(sdf_gt_, -config['clamp_dist'], config['clamp_dist'])
-            elif config['hard_sample_difficulty_weight'] is not None:
-                sdf_gt_ = torch.clamp(sdf_gt_, -1, 1)
+            # elif config['hard_sample_difficulty_weight'] is not None:
+            #     sdf_gt_ = torch.clamp(sdf_gt_, -1, 1)
             sdf_gt_.requires_grad = False
             sdf_gt.append(sdf_gt_)
         
@@ -239,8 +246,8 @@ def train_epoch(
             pred_sdf = model(inputs, epoch=epoch)
             if config['enforce_minmax'] is True:
                 pred_sdf = torch.clamp(pred_sdf, -config['clamp_dist'], config['clamp_dist'])
-            elif config['hard_sample_difficulty_weight'] is not None:
-                pred_sdf = torch.clamp(pred_sdf, -1, 1)
+            # elif config['hard_sample_difficulty_weight'] is not None:
+            #     pred_sdf = torch.clamp(pred_sdf, -1, 1)
 
             if config['verbose'] is True:
                 print('len pred_sdf', pred_sdf.shape)
@@ -256,7 +263,7 @@ def train_epoch(
                     print('sdf_gt shape', sdf_gt[surf_idx][split_idx].shape)
                 l1_losses.append(loss_l1(pred_sdf[:, surf_idx], sdf_gt[surf_idx][split_idx].squeeze(1).cuda()))
 
-            if 'multi_object_overlap' in config and config['multi_object_overlap'] is True:
+            if config.get('multi_object_overlap', False) == True:
                 raise Exception('Not implemented yet')
                 # Should add some weighted penalty to the l1 loss
                 # this is similar to surface_accuracy_e below
@@ -290,36 +297,33 @@ def train_epoch(
                     sample_weights = 1 + difficulty_weight * sdf_gt_sign * error_sign
                     l1_losses[surf_idx] = l1_losses[surf_idx] * sample_weights
 
-            elif config['sample_difficulty_lx'] is not None:
-                weight_schedule = calc_weight(epoch, config['n_epochs'], config['sample_difficulty_lx_schedule'], config['sample_difficulty_lx_cooldown'])
-                for surf_idx, surf_gt_ in enumerate(sdf_gt):
-                    difficulty_weight = 1 / (l1_losses[surf_idx] ** config['sample_difficulty_lx']  + config['sample_difficulty_lx_epsilon'])
-                    difficulty_weight = difficulty_weight * weight_schedule
-                    l1_losses[surf_idx] = l1_losses[surf_idx] * difficulty_weight
+            # elif config['sample_difficulty_lx'] is not None:
+            #     weight_schedule = calc_weight(epoch, config['n_epochs'], config['sample_difficulty_lx_schedule'], config['sample_difficulty_lx_cooldown'])
+            #     for surf_idx, surf_gt_ in enumerate(sdf_gt):
+            #         difficulty_weight = 1 / (l1_losses[surf_idx] ** config['sample_difficulty_lx']  + config['sample_difficulty_lx_epsilon'])
+            #         difficulty_weight = difficulty_weight * weight_schedule
+            #         l1_losses[surf_idx] = l1_losses[surf_idx] * difficulty_weight
                     
-            elif config['hard_sample_difficulty_power'] is not None:
-                weight_schedule = calc_weight(epoch, config['n_epochs'], config['hard_sample_difficulty_schedule'], config['hard_sample_difficulty_cooldown'])
+            # elif config['hard_sample_difficulty_power'] is not None:
+            #     weight_schedule = calc_weight(epoch, config['n_epochs'], config['hard_sample_difficulty_schedule'], config['hard_sample_difficulty_cooldown'])
 
-                for surf_idx, surf_gt_ in enumerate(sdf_gt):
-                    weight = 1 + config['hard_sample_difficulty_alpha'] * (-1 * surf_gt_[split_idx].squeeze(1).cuda() * pred_sdf[:, surf_idx])
-                    weight = torch.clamp(weight, min=0)
-                    weight = weight ** (config['hard_sample_difficulty_power'] * weight_schedule)
-                    l1_losses[surf_idx] = l1_losses[surf_idx] * weight
+            #     for surf_idx, surf_gt_ in enumerate(sdf_gt):
+            #         weight = 1 + config['hard_sample_difficulty_alpha'] * (-1 * surf_gt_[split_idx].squeeze(1).cuda() * pred_sdf[:, surf_idx])
+            #         weight = torch.clamp(weight, min=0)
+            #         weight = weight ** (config['hard_sample_difficulty_power'] * weight_schedule)
+            #         l1_losses[surf_idx] = l1_losses[surf_idx] * weight
                     
             # Weight each surface loss by the number of samples it has
             # so that the sum of them all is the same as the mean loss. 
             for idx, l1_loss_ in enumerate(l1_losses):
                 l1_losses[idx] = l1_loss_ / num_sdf_samples
-            
-            
-            # l1_loss = l1_loss / num_sdf_samples
 
             # Comput total loss for each mesh (which is the same as the 
             # mean).
             l1_loss = 0
 
             # Create weights for each surface
-            if ('surface_weighting' in config) & (isinstance(config['surface_weighting'] , (list, tuple))):
+            if isinstance(config.get('surface_weighting', None), (list, tuple)):
                 assert len(config['surface_weighting']) == n_surfaces
                 weights_total = n_surfaces
                 weights_sum = sum(config['surface_weighting'])
