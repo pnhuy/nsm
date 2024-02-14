@@ -30,7 +30,7 @@ config = {
     "sigma_far": 0.1,
     "random_function": 'normal',
     "center_pts": True,
-    "axis_align": False,
+    # "axis_align": False,
     "normalize_pts": True,
     "scale_method": 'max_rad',
     

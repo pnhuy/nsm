@@ -1,6 +1,7 @@
 import torch 
 import os
 import math
+import json
 
 class LearningRateSchedule:
     def get_learning_rate(self, epoch):
@@ -126,6 +127,26 @@ def save_model(config, epoch, decoder, model_subdir="model"):
             {"epoch": epoch, "model": decoder_.state_dict()},
             os.path.join(folder_save, filename),
         )
+    
+def save_model_params(config, list_mesh_paths):
+
+    if not os.path.exists(config['experiment_directory']):
+        os.makedirs(config['experiment_directory'], exist_ok=True)
+
+    path_save = os.path.join(config['experiment_directory'], 'model_params_config.json')
+
+    if os.path.exists(path_save):
+        return
+
+    dict_save = {
+        "list_mesh_paths": list_mesh_paths,
+    }
+    dict_save.update(config)
+
+    dict_save = filter_non_jsonable(dict_save)
+
+    with open(path_save, 'w') as f:
+        json.dump(dict_save, f, indent=4)
 
 def get_checkpoints(config):
     checkpoints = list(
@@ -190,3 +211,14 @@ def symmetric_chammfer(p1, p2, n_pts):
     """
     """
     pass
+
+
+def is_jsonable(x):
+    try:
+        json.dumps(x)
+        return True
+    except (TypeError, OverflowError):
+        return False
+
+def filter_non_jsonable(dict_obj):
+    return {k: v for k, v in dict_obj.items() if is_jsonable(v)}
