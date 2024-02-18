@@ -235,6 +235,15 @@ def reconstruct_latent(
                     else:
                         # if multiple surfaces - then compute loss for each surface and weight them
                         for sdf_idx in range(pred_sdf.shape[1]):
+                            if sdf_idx >= len(sdf_gt_):
+                                # might only have 1 surface (e.g., bone) and trying to reconstruct both
+                                # (e.g., bone and cartilage) - in this case, break 
+                                # TODO: this is a bit of a hack, should be handled better
+                                # right now it assumes the first surface is the bone / only of interest
+                                # but we might want to reconstruct bone from cartilage (maybe?) or maybe we put
+                                # cartilage first? Or maybe we have multiple bones & cartilage? 
+                                break
+
                             if difficulty_weight is not None:
                                 error_sign = torch.sign(sdf_gt_[sdf_idx][current_pt_idx:current_pt_idx + current_batch_size, ...].squeeze() - pred_sdf[:, sdf_idx].squeeze())
                                 sdf_gt_sign = torch.sign(sdf_gt_[sdf_idx][current_pt_idx:current_pt_idx + current_batch_size, ...].squeeze())
