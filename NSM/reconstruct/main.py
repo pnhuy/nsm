@@ -30,6 +30,72 @@ except:
     print('Error importing `sinkhorn` from NSM.dependencies')
     __emd__ = False
 
+
+def reconstruct_latent_sdf_gt_type_check(sdf_gt, verbose=False):
+    if type(sdf_gt) in (torch.Tensor, np.ndarray):
+        sdf_gt = [sdf_gt]
+    elif type(sdf_gt) in (list, tuple):
+        pass
+    elif type(sdf_gt) in (str):
+        raise Exception(
+            'Must provided xyz/sdf from mesh - resconstruct latent will not load mesh' +
+            'from file. Try reconstruct_mesh instead.'
+        )
+    else:
+        raise Exception('Invalid sdf_gt type')
+    
+    if verbose is True:
+        print('\tsdf_gt len:', len(sdf_gt))
+        for sdf in sdf_gt:
+            print('\tsdf shape:', sdf.shape)
+            print('\tsdf type:', type(sdf))
+
+    return sdf_gt
+
+def reconstruct_latent_pts_surface_type_check(pts_surface, verbose=False):
+    if isinstance(pts_surface, (list, tuple)):
+        pts_surface = torch.tensor(pts_surface).cuda()
+    elif isinstance(pts_surface, np.ndarray):
+        pts_surface = torch.from_numpy(pts_surface).cuda()
+    elif isinstance(pts_surface, torch.Tensor):
+        pass
+    else:
+        raise ValueError('pts_surface must be list, tuple, np.ndarray, or torch.Tensor')
+
+    if verbose is True:
+        print('\tpts_surface shape:', pts_surface.shape)
+        print('\tpts_surface type:', type(pts_surface))
+    return pts_surface
+
+def reconstruct_latent_decoders_type_check(decoders):    
+    if isinstance(decoders, torch.nn.Module):
+        decoders = [decoders,]
+    elif isinstance(decoders, (list, tuple)):
+        for decoder in decoders:
+            if not isinstance(decoder, torch.nn.Module):
+                raise ValueError('decoders must be a list of torch.nn.Module')
+    else:
+        raise ValueError('decoders must be a torch.nn.Module or a list of torch.nn.Module')
+    return decoders    
+
+def reconstruct_latent_get_lr_update_freq(n_lr_updates, num_iterations):
+    # Setup n LR updates
+    if (n_lr_updates == 0) or (n_lr_updates is None): 
+        adjust_lr_every = num_iterations + 1
+    else:
+        adjust_lr_every = num_iterations // n_lr_updates
+    
+    return adjust_lr_every
+
+def reconstruct_latent_preprocess_sdf_gt(sdf_gt, clamp_dist, device='cuda'):
+    # Set a clamp (maximum) distance to "model"
+    for sdf_idx, sdf in enumerate(sdf_gt):
+        if clamp_dist is not None:
+            sdf = torch.clamp(sdf, -clamp_dist, clamp_dist)
+        # Move to GPU
+        sdf_gt[sdf_idx] = sdf.to(device)
+    return sdf_gt
+
 def reconstruct_latent(
     decoders,
     num_iterations,
@@ -58,32 +124,18 @@ def reconstruct_latent(
     n_steps_sample_ramp=None, #200,
     difficulty_weight=None,
     pts_surface=None,
+    device='cuda'
 ):
-    if type(sdf_gt) in (torch.Tensor, np.ndarray):
-        sdf_gt = [sdf_gt]
-    elif type(sdf_gt) in (list, tuple):
-        pass
-    elif type(sdf_gt) in (str):
-        raise Exception(
-            'Must provided xyz/sdf from mesh - resconstruct latent will not load mesh' +
-            'from file. Try reconstruct_mesh instead.'
-        )
-    else:
-        raise Exception('Invalid sdf_gt type')
     
-    if isinstance(pts_surface, (list, tuple)):
-        pts_surface = torch.tensor(pts_surface).cuda()
-    elif isinstance(pts_surface, np.ndarray):
-        pts_surface = torch.from_numpy(pts_surface).cuda()
+    sdf_gt = reconstruct_latent_sdf_gt_type_check(sdf_gt, verbose=verbose)
+    pts_surface = reconstruct_latent_pts_surface_type_check(pts_surface, verbose=verbose)
+    decoders = reconstruct_latent_decoders_type_check(decoders)
+    adjust_lr_every = reconstruct_latent_get_lr_update_freq(n_lr_updates, num_iterations)
 
-    if not isinstance(decoders, (list, tuple)):
-        decoders = [decoders,]
-    
-    # Setup n LR updates
-    if (n_lr_updates == 0) or (n_lr_updates is None): 
-        adjust_lr_every = num_iterations + 1
-    else:
-        adjust_lr_every = num_iterations // n_lr_updates
+    if verbose is True:
+        # print info about xyz
+        print('\txyz shape:', xyz.shape)
+        print('\txyz type:', type(xyz))
 
     # Setup n_samples, if not specified. 
     if n_samples is None:
@@ -95,12 +147,8 @@ def reconstruct_latent(
     else:
         n_samples_init = None
     
-    # Set a clamp (maximum) distance to "model"
-    for sdf_idx, sdf in enumerate(sdf_gt):
-        if clamp_dist is not None:
-            sdf = torch.clamp(sdf, -clamp_dist, clamp_dist)
-        # Move to GPU
-        sdf_gt[sdf_idx] = sdf.cuda()
+    sdf_gt = reconstruct_latent_preprocess_sdf_gt(sdf_gt, clamp_dist, device=device)
+    
 
     # Initialize random latent vector directly on GPU
     latent = torch.ones(1, latent_size, device=torch.device('cuda')).normal_(mean=latent_init_mean, std=latent_init_std)
@@ -127,11 +175,11 @@ def reconstruct_latent(
     # MOVE DECODERS TO GPU
     # SET DECODERS TO EVAL SO NO BATCH NORM ETC.
     for decoder in decoders:
-        decoder.cuda()
+        decoder.to(device)
         decoder.eval()
     
     # PASS XYZ TO GPU
-    xyz = xyz.cuda()
+    xyz = xyz.to(device)
     
     for step in range(num_iterations):
 
@@ -169,7 +217,7 @@ def reconstruct_latent(
                     # which surface each point in xyz belongs to
                     n_samples_per = n_samples_ // len(sdf_gt)
                     # pre allocate array to store random samples
-                    rand_samp = torch.empty(n_samples_, dtype=torch.int64, device=torch.device('cuda'))
+                    rand_samp = torch.empty(n_samples_, dtype=torch.int64, device=torch.device(device))
                     for idx in range(len(sdf_gt)):
                         # get the locations of the points that belong to the current surface
                         pts_ = (pts_surface == idx).nonzero(as_tuple=True)[0]
@@ -204,6 +252,8 @@ def reconstruct_latent(
                 latent_input_ = latent_input
                 
             # concat latent and xyz that will be inputted into decoder. 
+            # print('latent_input_', latent_input_.shape)
+            # print('xyz_input', xyz_input.shape)
             inputs = torch.cat([latent_input_, xyz_input], dim=1)
 
             #TODO: potentially store each decoder's loss and return it to track in wandb?
@@ -219,7 +269,7 @@ def reconstruct_latent(
                     pred_sdf = decoder(inputs[current_pt_idx:current_pt_idx + current_batch_size, ...])
                     
                     # initialize loss as zeros
-                    _loss_ = torch.zeros(current_batch_size, device=torch.device('cuda'))
+                    _loss_ = torch.zeros(current_batch_size, device=torch.device(device))
 
                     # Apply clamping distance - to ignore points that are too far away
                     if clamp_dist is not None:
@@ -242,6 +292,8 @@ def reconstruct_latent(
                                 # right now it assumes the first surface is the bone / only of interest
                                 # but we might want to reconstruct bone from cartilage (maybe?) or maybe we put
                                 # cartilage first? Or maybe we have multiple bones & cartilage? 
+                                if verbose is True:
+                                    print(f'sdf_idx ({sdf_idx}) >= len(sdf_gt_) ({len(sdf_gt)})... exiting')
                                 break
 
                             if difficulty_weight is not None:
@@ -254,6 +306,11 @@ def reconstruct_latent(
                                 pred_sdf[:,sdf_idx].squeeze(), 
                                 sdf_gt_[sdf_idx][current_pt_idx:current_pt_idx + current_batch_size, ...].squeeze()
                             ) * loss_weight * sample_weights
+                            
+                            if verbose is True:
+                                print(f'loss_{sdf_idx} shape: ', _loss_.shape)
+                                print(f'loss_{sdf_idx} mean: ', _loss_.mean())
+                                print(f'loss_{sdf_idx} std: ', _loss_.std())
                     
                     # send gradient from each batch of SDF values to latent
                     _loss_ = torch.mean(_loss_)
@@ -381,6 +438,7 @@ def reconstruct_mesh(
     chamfer_norm=2,
     func=None,
     fix_mesh=True,
+    return_registration_params=False,
 ):
     """
     Reconstructs mesh at path using decoders. 
@@ -611,7 +669,7 @@ def reconstruct_mesh(
         print(f'metrics in {time_calc_recon_funcs:.2f} seconds')
     tic = time.time()
 
-    if calc_emd or calc_symmetric_chamfer or calc_assd or return_latent or (func is not None):
+    if calc_emd or calc_symmetric_chamfer or calc_assd or return_latent or (func is not None) or return_registration_params:
         result = {'mesh': meshes}
         result['orig_mesh'] = result_['orig_mesh']
 
@@ -643,6 +701,11 @@ def reconstruct_mesh(
             result_ = copy.copy(result)
             del result_['mesh']
             wandb.log(result_)
+        
+        if return_registration_params:
+            result['icp_transform'] = result_['icp_transform']
+            result['center'] = result_['center']
+            result['scale'] = result_['scale']
 
         return result
     else:

@@ -94,7 +94,7 @@ def create_mesh(
     for i in range(objects):
         sdf_values[..., i] = sdf_values_[..., i].reshape(n_pts_per_axis, n_pts_per_axis, n_pts_per_axis)
     # sdf_values = sdf_values.reshape(n_pts_per_axis, n_pts_per_axis, n_pts_per_axis)
-
+    
     # create mesh from gridded SDFs
     meshes = []
     for mesh_idx in range(objects):
@@ -136,14 +136,21 @@ def sdf_grid_to_mesh(
     voxel_size,
     scale=None,
     offset=None,
+    verbose=False,
 ):
     sdf_values = sdf_values.cpu().numpy()
+
+    if verbose is True:
+        print('Starting marching cubes... ')
 
     verts, faces, normals, values = marching_cubes(
         sdf_values, 
         level=0, 
         spacing=(voxel_size, voxel_size, voxel_size)
     )
+
+    if verbose is True:
+        print('Starting vert/face conversion...')
 
     verts += voxel_origin
 
@@ -161,6 +168,10 @@ def sdf_grid_to_mesh(
         faces_.append(face)
     
     faces = np.hstack(faces_)
+
+    if verbose is True:
+        print('Creating mesh... ')
+        
     mesh = mskt.mesh.Mesh(mesh=pv.PolyData(verts, faces))
 
     return mesh
