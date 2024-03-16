@@ -93,11 +93,14 @@ def slerp_latent(latent1, latent2, step):
     """
     assert (step > 0) and (step <= 1)
     
-    latent1_norm = latent1 / np.linalg.norm(latent1)
-    latent2_norm = latent2 / np.linalg.norm(latent2)
+    latent1_mag = np.linalg.norm(latent1)
+    latent2_mag = np.linalg.norm(latent2)
+
+    latent1_norm = latent1 / latent1_mag
+    latent2_norm = latent2 / latent2_mag
     
     latent_norm = scipy.spatial.geometric_slerp(latent1_norm, latent2_norm, step)
-    latent_mag = (1-step) * latent1_norm + step * latent2_norm
+    latent_mag = (1-step) * latent1_mag + step * latent2_mag
     
     new_latent = latent_norm * latent_mag
     
@@ -211,13 +214,19 @@ def interpolate_common(model, latent1, latent2, n_steps=100, data=None, surface_
                 else:
                     raise Exception(f'Unknown smoothing type: {smooth_type}')
         else:
-            new_points = torch.tensor(data, dtype=torch.float).to(device)
-            new_points = update_positions(model, new_latent, new_points, surface_idx=surface_idx, verbose=verbose)
+            if isinstance(data, np.ndarray):
+                data = torch.tensor(data, dtype=torch.float).to(device)
+            elif not torch.is_tensor(data):
+                raise Exception(f'Unknown data type: {type(data)}')
+      
+            data = data.to(device)
+            data = update_positions(model, new_latent, data, surface_idx=surface_idx, verbose=verbose)
     
-    if is_mesh:
-        return data
-    else:
-        return new_points.detach().cpu().numpy()
+    if not is_mesh:
+        data = data.detach().cpu().numpy()
+    
+    return data
+
 
 
 def interpolate_points(model, latent1, latent2, n_steps=100, points1=None, surface_idx=0, verbose=False, spherical=True):
