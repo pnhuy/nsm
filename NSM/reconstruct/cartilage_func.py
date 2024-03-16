@@ -13,12 +13,44 @@ CART_REGIONS = (
     15  # lat post fem
 )
 
+CART_REGIONS_DICT = {
+    'tibia': (2, 3),
+    'patella': (4,),
+    'femur': (11, 12, 13, 14, 15),
+}
+
+
+def compare_cart_thickness_tibia(orig_meshes, recon_meshes, regions_label='labels'):
+    return compare_cart_thickness(
+        orig_meshes,
+        recon_meshes,
+        cart_regions=CART_REGIONS_DICT['tibia'],
+        regions_label=regions_label
+    )
+
+def compare_cart_thickness_patella(orig_meshes, recon_meshes, regions_label='labels'):
+    return compare_cart_thickness(
+        orig_meshes,
+        recon_meshes,
+        cart_regions=CART_REGIONS_DICT['patella'],
+        regions_label=regions_label
+    )
+
+def compare_cart_thickness_femur(orig_meshes, recon_meshes, regions_label='labels'):
+    return compare_cart_thickness(
+        orig_meshes,
+        recon_meshes,
+        cart_regions=CART_REGIONS_DICT['femur'],
+        regions_label=regions_label
+    )
+
 
 def compare_cart_thickness(
         orig_meshes,
         recon_meshes,
         cart_regions=CART_REGIONS,
         regions_label='labels',
+        
 ):
     orig_bone, orig_cart = orig_meshes
     recon_bone, recon_cart = recon_meshes

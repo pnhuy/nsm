@@ -8,7 +8,7 @@ from NSM.utils import (
     get_latent_vecs,
     get_checkpoints,
 )
-from NSM.reconstruct import get_mean_errors, compare_cart_thickness
+from NSM.reconstruct import get_mean_errors, compare_cart_thickness, compare_cart_thickness_tibia, compare_cart_thickness_patella, compare_cart_thickness_femur
 
 from NSM.train.utils import (
     get_kld,
@@ -28,6 +28,9 @@ import numpy as np
 
 DICT_VALIDATION_FUNCS = {
     'compare_cart_thickness': compare_cart_thickness,
+    'compare_cart_thickness_tibia': compare_cart_thickness_tibia,
+    'compare_cart_thickness_patella': compare_cart_thickness_patella,
+    'compare_cart_thickness_femur': compare_cart_thickness_femur,
     None: None
 }
 
@@ -77,7 +80,7 @@ def train_deep_sdf(
 
         for epoch in range(1, config['n_epochs'] + 1):
             # not passing latent_vecs because presumably they are being tracked by the
-            # and updated in memory? 
+            # and updated in memory?
             log_dict = train_epoch(model, data_loader, latent_vecs, optimizer=optimizer, config=config, epoch=epoch, return_loss=True)
             
             if epoch in config['checkpoints']:
@@ -177,6 +180,10 @@ def train_epoch(
         # if config['code_regularization_type_prior'] == 'kld_diagonal':
         #     kld_loss = get_kld(latent_vecs)
 
+    step_mean_size = 0
+    step_mean_load_time = 0
+    step_mean_load_rate = 0
+    step_whole_load_time = 0
 
     for sdf_data, indices in data_loader:
         if config['verbose'] is True:
@@ -396,6 +403,11 @@ def train_epoch(
                 model.parameters(), config['grad_clip']
             )
         
+        step_mean_size += torch.mean(sdf_data['size']).item()
+        step_mean_load_time += torch.mean(sdf_data['time']).item()
+        step_mean_load_rate += torch.mean(sdf_data['mb_per_sec']).item()
+        step_whole_load_time += torch.mean(sdf_data['whole_load_time']).item()
+        
         optimizer.step()
     end = time.time()
 
@@ -404,7 +416,12 @@ def train_epoch(
     save_loss = step_losses / len(data_loader)
     save_l1_loss = step_l1_loss / len(data_loader)
     save_code_reg_loss = step_code_reg_loss / len(data_loader) 
-    save_l1_losses = [l1_loss_ / len(data_loader) for l1_loss_ in step_l1_losses]   
+    save_l1_losses = [l1_loss_ / len(data_loader) for l1_loss_ in step_l1_losses]
+
+    save_mean_size = step_mean_size / len(data_loader)
+    save_mean_load_time = step_mean_load_time / len(data_loader)
+    save_mean_load_rate = step_mean_load_rate / len(data_loader)
+    save_whole_load_time = step_whole_load_time / len(data_loader)
     
     print('save loss: ', save_loss)
     print('\t save l1 loss: ', save_l1_loss)
@@ -416,6 +433,10 @@ def train_epoch(
         'epoch_time_s': seconds_elapsed,
         'l1_loss': save_l1_loss,
         'latent_code_regularization_loss': save_code_reg_loss,
+        'mean_size': save_mean_size,
+        'mean_load_time': save_mean_load_time,
+        'mean_load_rate': save_mean_load_rate,
+        'whole_load_time': save_whole_load_time,
     }
     for l1_idx, l1_loss_ in enumerate(save_l1_losses):
         log_dict['l1_loss_{}'.format(l1_idx)] = l1_loss_

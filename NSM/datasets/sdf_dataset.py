@@ -1193,8 +1193,13 @@ class MultiSurfaceSDFSamples(SDFSamples):
         store_data_in_memory=False,
         multiprocessing=True,     
         debug_memory=False,
-        n_processes=2,    
+        n_processes=2,
+        test_load_times=True,
     ):
+        self.times = []
+        self.data_size = []
+        self.mb_per_sec = []
+        self.test_load_times = test_load_times
         # Multi surface specific
         self.mesh_to_scale = mesh_to_scale
         self.total_n_pts = sum(n_pts)
@@ -1543,9 +1548,26 @@ class MultiSurfaceSDFSamples(SDFSamples):
         # constantly undoing/re-doing elsewhere in the code - and it even lookts like
         # the sdfs/pts are stroed separately in the npy files. 
 
+        tic_whole_load = time.time()
         if self.store_data_in_memory is False:
             # if not storing in memory, then load from cache
+
+            # if self.test_load_times is True:
+            tic = time.time()
             data_ = np.load(self.data[idx])
+            toc = time.time()
+            time_ = toc - tic
+            # self.times.append(time_)
+    
+            # get size of the numpy file in mb
+            size = os.path.getsize(self.data[idx]) / 1e6
+            # self.sizes.append(size)
+
+            # self.mb_per_sec.append(size / time_)
+
+            if self.verbose is True:
+                print(f'size: {size}mb, time: {time_}s, mb/s: {size / time_}mb/s')
+
             if self.equal_pos_neg is True:
                 list_keys_unpack = ['pos_idx', 'neg_idx']
             else:
@@ -1610,5 +1632,13 @@ class MultiSurfaceSDFSamples(SDFSamples):
                 'xyz': data_['xyz'][idx_, :],
                 'gt_sdf': data_['gt_sdf'][idx_, :],
             }
+
+            toc_whole_load = time.time()
+
+            if self.test_load_times is True:
+                data_['time'] = time_
+                data_['size'] = size
+                data_['mb_per_sec'] = size / time_
+                data_['whole_load_time'] = toc_whole_load - tic_whole_load
         
         return data_, idx
