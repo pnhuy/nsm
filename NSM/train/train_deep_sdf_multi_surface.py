@@ -46,6 +46,9 @@ def train_deep_sdf(
     config['checkpoints'] = get_checkpoints(config)
     config['lr_schedules'] = get_learning_rate_schedules(config)
 
+    if 'resume_epoch' not in config:
+        config['resume_epoch'] = 0
+
     model = model.to(config['device'])
 
     if use_wandb is True:
@@ -72,18 +75,53 @@ def train_deep_sdf(
     )
 
     latent_vecs = get_latent_vecs(len(data_loader.dataset), config).cuda()
-
     optimizer = get_optimizer(model, latent_vecs, lr_schedules=config['lr_schedules'], optimizer=config["optimizer"], weight_decay=config["weight_decay"])
+    
+    if config['resume_epoch'] > 1:
+        print('Loading model, optimizer, and latent states from epoch', config['resume_epoch'])
+        # load the model states
+        model.load_state_dict(
+            torch.load(
+                os.path.join(
+                    config['experiment_directory'], 
+                    'model', 
+                    f'{config["resume_epoch"]}.pth'
+                )
+            )['model']
+        )
 
+        # load the optimizer states
+        optimizer.load_state_dict(
+            torch.load(
+                os.path.join(
+                    config['experiment_directory'], 
+                    'model', 
+                    f'{config["resume_epoch"]}.pth'
+                )
+            )['optimizer']
+        )
+
+        # load the latent vectors
+        latent_vecs.load_state_dict(
+            torch.load(
+                os.path.join(
+                    config['experiment_directory'], 
+                    'latent_codes', 
+                    f'{config["resume_epoch"]}.pth'
+                )
+            )['latent_codes']
+        )
+
+    
     # profiler that runs if config['profiler'] is True, else a dummy profiler is used and should have no effect
     with get_profiler(config) as profiler:
 
-        for epoch in range(1, config['n_epochs'] + 1):
+        for epoch in range(config['resume_epoch'] + 1, config['n_epochs'] + 1):
             # not passing latent_vecs because presumably they are being tracked by the
             # and updated in memory?
             log_dict = train_epoch(model, data_loader, latent_vecs, optimizer=optimizer, config=config, epoch=epoch, return_loss=True)
             
-            if epoch in config['checkpoints']:
+            if epoch in config['checkpoints'] or epoch % config['save_frequency'] == 0:
 
                 save_model_params(config=config, list_mesh_paths=sdf_dataset.list_mesh_paths)
 
@@ -96,9 +134,11 @@ def train_deep_sdf(
                     config=config,
                     epoch=epoch,
                     decoder=model,
+                    optimizer=optimizer
                 )
-                if ('val_paths' in config) & (config['val_paths'] is not None):
-                    
+            
+            if (epoch in config['checkpoints']) and ('val_paths' in config) and (config['val_paths'] is not None):
+
                     torch.cuda.empty_cache()
 
                     # TODO: Change this to just accept the config? 
@@ -146,7 +186,7 @@ def train_deep_sdf(
                     log_dict.update(dict_loss)
 
             if use_wandb is True:                    
-                wandb.log(log_dict)
+                wandb.log(log_dict, step=epoch-1)
             
             profiler.step()
 

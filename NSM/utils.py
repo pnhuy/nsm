@@ -107,7 +107,7 @@ def save_latent_vectors(config, epoch, latent_vec, latent_codes_subdir="latent_c
         os.path.join(folder_save, filename),
     )
 
-def save_model(config, epoch, decoder, model_subdir="model"):
+def save_model(config, epoch, decoder, model_subdir="model", optimizer=None):
     if type(decoder) not in (list, tuple):
         decoder = [decoder]
     
@@ -123,8 +123,14 @@ def save_model(config, epoch, decoder, model_subdir="model"):
         if not os.path.exists(folder_save):
             os.makedirs(folder_save, exist_ok=True)
         
+        dict_ = {
+            "epoch": epoch, 
+            "model": decoder_.state_dict(),
+            "optimizer": optimizer.state_dict() if optimizer is not None else "None"
+        }
+        
         torch.save(
-            {"epoch": epoch, "model": decoder_.state_dict()},
+            dict_,
             os.path.join(folder_save, filename),
         )
     
