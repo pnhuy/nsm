@@ -11,6 +11,7 @@ import warnings
 import time
 import point_cloud_utils as pcu
 from multiprocessing import Pool
+import multiprocessing
 import zipfile
 import gc
 try:
@@ -681,6 +682,7 @@ class SDFSamples(torch.utils.data.Dataset):
 
         self.data = []
         # Wrap this loading loop in a multiprocessing pool
+        print(f'CPU affinity:{os.sched_getaffinity(0)}') 
         if self.multiprocessing is True:
             list_inputs = [(loc_mesh, self.verbose) for loc_mesh in self.list_mesh_paths]
             with Pool(processes=self.n_processes) as pool:
@@ -694,8 +696,8 @@ class SDFSamples(torch.utils.data.Dataset):
         self.data = [x for x in self.data if x is not None]
 
         if self.scale_jointly is True:
-            self.norm_and_scale_all_meshes()
-        
+            self.norm_and_scale_all_meshes()    
+    
     
     def print_memory_summary(self):
         if self._memory_tracker is None:
@@ -730,6 +732,8 @@ class SDFSamples(torch.utils.data.Dataset):
         if self.debug_memory is True:
             self.print_memory_summary()
         
+        if self.multiprocessing is True:
+            os.sched_setaffinity(0, range(multiprocessing.cpu_count()))
         data = self.get_sample_data_dict(loc_mesh)
         
         if data is None:
@@ -1273,6 +1277,10 @@ class MultiSurfaceSDFSamples(SDFSamples):
         return True
                 
     def get_sample_data_dict(self, loc_meshes):
+        #with open(os.path.expanduser('~/test.txt'), 'a') as f:
+            # Use the print function with the `file` argument to write to the file.
+            # print(f'inside get_sample_data_dict, affinity: {os.sched_getaffinity(0)}', file=f)        
+        
         if type(loc_meshes) not in (tuple, list):
             loc_meshes = [loc_meshes]
         
