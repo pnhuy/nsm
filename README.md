@@ -21,16 +21,8 @@ conda activate NSM
 ```
 
 
-# Install pymskt: https://github.com/gattia/pymskt
-
 ``` bash
-git clone https://github.com/gattia/pymskt
-make requirements
-pip install .  # pip install -e . if you want it in editable mode to update pymskt
-```
-
-``` bash
-mamba install pytorch==2.0.0 torchvision==0.15.0 torchaudio==2.0.0 pytorch-cuda=11.7 -c pytorch -c nvidia
+conda install pytorch==2.0.0 torchvision==0.15.0 torchaudio==2.0.0 pytorch-cuda=11.7 -c pytorch -c nvidia
 make requirements
 ```
 
