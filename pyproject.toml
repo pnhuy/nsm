@@ -41,8 +41,9 @@ Documentation = "https://anthonygattiphd.com/NSM/"
 version = {attr = "NSM.__version__"} 
 
 # setuptools specific items
-[tool.setuptools]
-packages = ['NSM'] 
+[tool.setuptools.packages]
+find = {include = ['NSM', 'NSM.*']}
+
 
 # information about "tools" 
 [tool.isort]
