@@ -439,6 +439,7 @@ def reconstruct_mesh(
     func=None,
     fix_mesh=True,
     return_registration_params=False,
+    return_timing=False
 ):
     """
     Reconstructs mesh at path using decoders. 
@@ -669,7 +670,7 @@ def reconstruct_mesh(
         print(f'metrics in {time_calc_recon_funcs:.2f} seconds')
     tic = time.time()
 
-    if calc_emd or calc_symmetric_chamfer or calc_assd or return_latent or (func is not None) or return_registration_params:
+    if calc_emd or calc_symmetric_chamfer or calc_assd or return_latent or (func is not None) or return_registration_params or return_timing:
         result = {'mesh': meshes}
         result['orig_mesh'] = result_['orig_mesh']
 
@@ -706,6 +707,14 @@ def reconstruct_mesh(
             result['icp_transform'] = result_['icp_transform']
             result['center'] = result_['center']
             result['scale'] = result_['scale']
+        
+        if return_timing:
+            result['time_load_mean'] = time_load_mean
+            result['time_load_mesh'] = time_load_mesh
+            result['time_recon_latent'] = time_recon_latent
+            result['time_create_mesh'] = time_create_mesh
+            result['time_calc_recon_funcs'] = time_calc_recon_funcs
+            result['time_calc_recon_loss'] = time_calc_recon_loss
 
         return result
     else:
