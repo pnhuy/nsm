@@ -714,7 +714,6 @@ def reconstruct_mesh(
             result['time_recon_latent'] = time_recon_latent
             result['time_create_mesh'] = time_create_mesh
             result['time_calc_recon_funcs'] = time_calc_recon_funcs
-            result['time_calc_recon_loss'] = time_calc_recon_loss
 
         return result
     else:
