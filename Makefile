@@ -1,4 +1,4 @@
-.PHONY: build install 
+.PHONY: build install requirements requirements-mamba requirements-conda install-dev dev dev-mamba dev-conda docs test lint autoformat clean coverage
 
 requirements:
 	python -m pip install -r requirements.txt
