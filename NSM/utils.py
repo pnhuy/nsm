@@ -2,6 +2,8 @@ import torch
 import os
 import math
 import json
+import schedulefree
+
 
 class LearningRateSchedule:
     def get_learning_rate(self, epoch):
@@ -210,6 +212,12 @@ def get_optimizer(model, latent_vecs, lr_schedules, optimizer="Adam", weight_dec
         optimizer = torch.optim.Adam(list_params)
     elif optimizer == "AdamW":
         optimizer = torch.optim.AdamW(list_params, weight_decay=weight_decay)
+    elif optimizer == "schedule_free_AdamW":
+        optimizer = schedulefree.AdamWScheduleFree(list_params, weight_decay=weight_decay)
+    elif optimizer == "schedule_free_SGD":
+        raise NotImplementedError
+    else:
+        raise ValueError(f"Unknown optimizer: {optimizer}")
 
     return optimizer
 

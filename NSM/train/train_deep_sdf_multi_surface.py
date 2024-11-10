@@ -24,6 +24,7 @@ import os
 import torch 
 import time
 import numpy as np
+import itertools
 
 
 DICT_VALIDATION_FUNCS = {
@@ -120,9 +121,21 @@ def train_deep_sdf(
             # not passing latent_vecs because presumably they are being tracked by the
             # and updated in memory?
             log_dict = train_epoch(model, data_loader, latent_vecs, optimizer=optimizer, config=config, epoch=epoch, return_loss=True)
+            val_epoch = (epoch in config['checkpoints']) and ('val_paths' in config) and (config['val_paths'] is not None)
+            checkpoint_epoch = (epoch in config['checkpoints'] or epoch % config['save_frequency'] == 0)
             
-            if epoch in config['checkpoints'] or epoch % config['save_frequency'] == 0:
-
+            if (val_epoch or checkpoint_epoch):
+                # if validation or checkpoint and 
+                # using schedule_free optimizer, 
+                # then set the optimizer to eval mode
+                if 'schedule_free' in config['optimizer']:
+                    optimizer.eval()
+                    # raise Exception('HOW TO IMPLEMENT BATCH NORM FIX? https://github.com/facebookresearch/schedule_free/issues/44')
+                    with torch.no_grad():
+                        for batch in itertools.islice(data_loader, 50):
+                            model(batch)
+            
+            if checkpoint_epoch: 
                 save_model_params(config=config, list_mesh_paths=sdf_dataset.list_mesh_paths)
 
                 save_latent_vectors(
@@ -137,10 +150,9 @@ def train_deep_sdf(
                     optimizer=optimizer
                 )
             
-            if (epoch in config['checkpoints']) and ('val_paths' in config) and (config['val_paths'] is not None):
-
+            if val_epoch:
                     torch.cuda.empty_cache()
-
+                    
                     # TODO: Change this to just accept the config? 
                     # or... update all parameters to be the same in the config and the function call?
                     # this will just allow unpacking of the config dict.
@@ -210,12 +222,17 @@ def train_epoch(
     # for model in models:
     model.train()
 
-    adjust_learning_rate(config['lr_schedules'], optimizer, epoch)
+    if not ('schedule_free' in config['optimizer']):
+        adjust_learning_rate(config['lr_schedules'], optimizer, epoch)
+    else:
+        optimizer.train()
     
     step_losses = 0
     step_l1_loss = 0
     step_code_reg_loss = 0
     step_l1_losses = [0. for _ in range(n_surfaces)]
+    step_mean_vec_length = 0
+    step_std_vec_length = 0
 
         # if config['code_regularization_type_prior'] == 'kld_diagonal':
         #     kld_loss = get_kld(latent_vecs)
@@ -428,6 +445,10 @@ def train_epoch(
                 chunk_loss = chunk_loss + reg_loss.cuda()
                 batch_code_reg_loss += reg_loss.item()
             
+            mean_vec_length = torch.mean(torch.norm(batch_vecs, dim=1))
+            std_vec_length = torch.std(torch.norm(batch_vecs, dim=1))
+            
+            
             chunk_loss.backward()
 
             batch_loss += chunk_loss.item()
@@ -437,6 +458,9 @@ def train_epoch(
         step_code_reg_loss += batch_code_reg_loss
         for l1_idx, l1_loss_ in enumerate(batch_l1_losses):
             step_l1_losses[l1_idx] += l1_loss_ # l1_loss_
+        
+        step_mean_vec_length = mean_vec_length.item()
+        step_std_vec_length = std_vec_length.item()
         
         if config['grad_clip'] is not None:
             torch.nn.utils.clip_grad_norm_(
@@ -457,6 +481,8 @@ def train_epoch(
     save_l1_loss = step_l1_loss / len(data_loader)
     save_code_reg_loss = step_code_reg_loss / len(data_loader) 
     save_l1_losses = [l1_loss_ / len(data_loader) for l1_loss_ in step_l1_losses]
+    save_mean_vec_length = step_mean_vec_length / len(data_loader)
+    save_std_vec_length = step_std_vec_length / len(data_loader)
 
     save_mean_size = step_mean_size / len(data_loader)
     save_mean_load_time = step_mean_load_time / len(data_loader)
@@ -477,6 +503,8 @@ def train_epoch(
         'mean_load_time': save_mean_load_time,
         'mean_load_rate': save_mean_load_rate,
         'whole_load_time': save_whole_load_time,
+        'mean_vec_length': save_mean_vec_length,
+        'std_vec_length': save_std_vec_length
     }
     for l1_idx, l1_loss_ in enumerate(save_l1_losses):
         log_dict['l1_loss_{}'.format(l1_idx)] = l1_loss_

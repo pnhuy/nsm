@@ -240,7 +240,6 @@ def reconstruct_latent(
                 xyz_input = xyz[rand_samp, ...]
                 sdf_gt_ = [x[rand_samp, ...] for x in sdf_gt]
             else:
-                # if n_samples == xyz.shape[0], then just use all of the xyz points and sdf_gt
                 xyz_input = xyz
                 sdf_gt_ = sdf_gt
             
@@ -252,8 +251,6 @@ def reconstruct_latent(
                 latent_input_ = latent_input
                 
             # concat latent and xyz that will be inputted into decoder. 
-            # print('latent_input_', latent_input_.shape)
-            # print('xyz_input', xyz_input.shape)
             inputs = torch.cat([latent_input_, xyz_input], dim=1)
 
             #TODO: potentially store each decoder's loss and return it to track in wandb?
@@ -329,12 +326,7 @@ def reconstruct_latent(
                 latent_loss_ = 0        
             
             loss_ = recon_loss_ + latent_loss_
-
-            # if optimizer_name =='adam':
-            #     return 
-
-
-            # loss_.backward()
+            
             return loss_
         
         # Run the step_ (defined above) and the appropriate optimizer
