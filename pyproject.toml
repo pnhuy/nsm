@@ -92,3 +92,5 @@ run.omit = ["testing/*", "*/*_test.py"]
 
 [tool.pytest.ini_options]
 addopts = "-k 'not train_test.py'"
+testpaths = ["tests"]
+pythonpath = ["."]
