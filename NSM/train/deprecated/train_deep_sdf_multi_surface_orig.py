@@ -8,14 +8,7 @@ from NSM.utils import (
     get_latent_vecs,
     get_checkpoints,
 )
-from NSM.reconstruct import (
-    get_mean_errors, 
-    compare_cart_thickness, 
-    compare_cart_thickness_tibia, 
-    compare_cart_thickness_patella, 
-    compare_cart_thickness_femur,
-    compare_cart_thickness_whole_joint
-)
+from NSM.reconstruct import get_mean_errors, compare_cart_thickness, compare_cart_thickness_tibia, compare_cart_thickness_patella, compare_cart_thickness_femur
 
 from NSM.train.utils import (
     get_kld,
@@ -39,7 +32,6 @@ DICT_VALIDATION_FUNCS = {
     'compare_cart_thickness_tibia': compare_cart_thickness_tibia,
     'compare_cart_thickness_patella': compare_cart_thickness_patella,
     'compare_cart_thickness_femur': compare_cart_thickness_femur,
-    'compare_cart_thickness_whole_joint': compare_cart_thickness_whole_joint,
     None: None
 }
 
@@ -49,15 +41,7 @@ def train_deep_sdf(
     config, 
     model,
     sdf_dataset, 
-    use_wandb=False):
-    
-    # add default params for backwards compatibility between
-    # train_deep_sdf and train_deep_sdf_multi_surface.
-    config.setdefault('objects_per_decoder', 1)
-    config.setdefault('resume_epoch', 0)
-    config.setdefault('scale_jointly', False)
-    config.setdefault('fix_mesh_recon', False)
-    config.setdefault('log_latent', None)
+    use_wandb=False):    
 
     config = add_plain_lr_to_config(config)
     config['checkpoints'] = get_checkpoints(config)
@@ -195,7 +179,7 @@ def train_deep_sdf(
                         convergence_patience=config['convergence_patience_recon'],
                         # log_wandb
                         verbose=config['verbose'],
-                        objects_per_decoder=config["objects_per_decoder"],
+                        objects_per_decoder=2,
                         batch_size_latent_recon=config['batch_size_latent_recon'],
                         get_rand_pts=config['get_rand_pts_recon'],
                         n_pts_random=config['n_pts_random_recon'],
@@ -270,26 +254,20 @@ def train_epoch(
         num_sdf_samples = xyz.shape[0]
         xyz.requires_grad = False
 
-        indices = indices.cuda()
+        indices = indices.cuda()        
         
         sdf_gt = []
-        if n_surfaces == 1:
-            # Handle the case where there is only one surface
-            sdf_gt_ = sdf_data['gt_sdf'].reshape(-1, 1)
+        for surf_idx in range(n_surfaces):
+            sdf_gt_ = sdf_data['gt_sdf'][:, :, surf_idx].reshape(-1, 1)
             if config['enforce_minmax'] is True:
                 sdf_gt_ = torch.clamp(sdf_gt_, -config['clamp_dist'], config['clamp_dist'])
+            # elif config['hard_sample_difficulty_weight'] is not None:
+            #     sdf_gt_ = torch.clamp(sdf_gt_, -1, 1)
             sdf_gt_.requires_grad = False
             sdf_gt.append(sdf_gt_)
-        else:
-            for surf_idx in range(n_surfaces):
-                sdf_gt_ = sdf_data['gt_sdf'][:, :, surf_idx].reshape(-1, 1)
-                if config['enforce_minmax'] is True:
-                    sdf_gt_ = torch.clamp(sdf_gt_, -config['clamp_dist'], config['clamp_dist'])
-                sdf_gt_.requires_grad = False
-                sdf_gt.append(sdf_gt_)
         
         if config['verbose'] is True:
-            print(f'sdf gt size: {[x_.size() for x_ in sdf_gt]}')
+            print('sdf gt size:', sdf_gt[0].size(), sdf_gt[1].size())
 
         xyz = torch.chunk(xyz, config['batch_split'])
         indices = torch.chunk(
@@ -302,7 +280,7 @@ def train_epoch(
         
         if config['verbose'] is True:
             print('len sdf_gt', len(sdf_gt))
-            print(f'len sdf_gt chunks: {[len(x_) for x_ in sdf_gt]}')
+            print('len sdf_gt chunks', len(sdf_gt[0]), len(sdf_gt[1]))
             print('len xyz chunks', len(xyz))
 
         batch_loss = 0.0
@@ -327,20 +305,9 @@ def train_epoch(
             inputs = torch.cat([batch_vecs, xyz[split_idx]], dim=1)
             # inputs = inputs.to(config['device'])
 
-            if config['verbose'] is True:
-                print('model dtype', next(model.parameters()).dtype)
-                print('inputs dtype', inputs.dtype)
             # pred_sdfs = []
             # for model in models:
             pred_sdf = model(inputs, epoch=epoch)
-            
-            if n_surfaces == 1:
-                # Ensure pred_sdf is 2D even for single surface
-                if pred_sdf.dim() == 2 and pred_sdf.shape[1] == 1:
-                    pass  # Already correct shape
-                else:
-                    pred_sdf = pred_sdf.unsqueeze(1)  # Add surface dimension if needed
-            
             if config['enforce_minmax'] is True:
                 pred_sdf = torch.clamp(pred_sdf, -config['clamp_dist'], config['clamp_dist'])
             # elif config['hard_sample_difficulty_weight'] is not None:
