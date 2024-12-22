@@ -673,7 +673,7 @@ def reconstruct_mesh(
         result['orig_mesh'] = result_['orig_mesh']
 
         if calc_emd or calc_symmetric_chamfer or calc_assd:
-            result_ = compute_recon_loss(
+            result_recon_metrics = compute_recon_loss(
                 meshes=meshes,
                 orig_meshes=result_['orig_mesh'],
                 # orig_pts=result_['orig_pts'],
@@ -688,7 +688,7 @@ def reconstruct_mesh(
             if verbose is True:
                 print(f'metrics in {time_calc_recon_loss:.2f} seconds')
 
-            result.update(result_)
+            result.update(result_recon_metrics)
 
         if return_latent:
             result['latent'] = latent
@@ -696,22 +696,24 @@ def reconstruct_mesh(
         if func is not None:
             result.update(func_results)      
 
-        if log_wandb is True:
-            result_ = copy.copy(result)
-            del result_['mesh']
-            wandb.log(result_)
-        
-        if return_registration_params:
-            result['icp_transform'] = result_['icp_transform']
-            result['center'] = result_['center']
-            result['scale'] = result_['scale']
-        
         if return_timing:
             result['time_load_mean'] = time_load_mean
             result['time_load_mesh'] = time_load_mesh
             result['time_recon_latent'] = time_recon_latent
             result['time_create_mesh'] = time_create_mesh
             result['time_calc_recon_funcs'] = time_calc_recon_funcs
+            
+        if log_wandb is True:
+            # Do this before adding registration params that are not needed 
+            # and might not be compatible (e.g., icp_transform)
+            result_wandb = copy.copy(result)
+            del result_wandb['mesh']
+            wandb.log(result_wandb)
+        
+        if return_registration_params:
+            result['icp_transform'] = result_['icp_transform']
+            result['center'] = result_['center']
+            result['scale'] = result_['scale']
 
         return result
     else:
