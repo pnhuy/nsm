@@ -22,27 +22,58 @@ CART_REGIONS_DICT = {
 
 def compare_cart_thickness_tibia(orig_meshes, recon_meshes, regions_label='labels'):
     return compare_cart_thickness(
-        orig_meshes,
-        recon_meshes,
+        orig_meshes[:2],
+        recon_meshes[:2],
         cart_regions=CART_REGIONS_DICT['tibia'],
         regions_label=regions_label
     )
 
 def compare_cart_thickness_patella(orig_meshes, recon_meshes, regions_label='labels'):
     return compare_cart_thickness(
-        orig_meshes,
-        recon_meshes,
+        orig_meshes[:2],
+        recon_meshes[:2],
         cart_regions=CART_REGIONS_DICT['patella'],
         regions_label=regions_label
     )
 
 def compare_cart_thickness_femur(orig_meshes, recon_meshes, regions_label='labels'):
     return compare_cart_thickness(
-        orig_meshes,
-        recon_meshes,
+        orig_meshes[:2],
+        recon_meshes[:2],
         cart_regions=CART_REGIONS_DICT['femur'],
         regions_label=regions_label
     )
+
+def compare_cart_thickness_whole_joint(orig_meshes, recon_meshes, regions_label='labels'):
+    dict_results = {}
+    
+    fem_results = compare_cart_thickness(
+        orig_meshes[:2],
+        recon_meshes[:2],
+        cart_regions=CART_REGIONS_DICT['femur'],
+        regions_label=regions_label
+    )
+    
+    tib_results = compare_cart_thickness(
+        orig_meshes[2:4],
+        recon_meshes[2:4],
+        cart_regions=CART_REGIONS_DICT['tibia'],
+        regions_label=regions_label
+    )
+    
+    pat_results = compare_cart_thickness(
+        orig_meshes[4:6],
+        recon_meshes[4:6],
+        cart_regions=CART_REGIONS_DICT['patella'],
+        regions_label=regions_label
+    )
+    
+    dict_results.update(fem_results)
+    dict_results.update(tib_results)
+    dict_results.update(pat_results)
+    
+    return dict_results
+    
 
 
 def compare_cart_thickness(
