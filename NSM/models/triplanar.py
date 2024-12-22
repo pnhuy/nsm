@@ -284,7 +284,15 @@ class TriplanarDecoder(nn.Module):
         
         return xy_new[None, :, None, :]
 
-    def forward(self, x, epoch=None):
+    def forward(self, x, epoch=None, verbose=False):
+        if verbose is True:
+            print('Triplanar.forward()')
+            print('Epoch: ', epoch)
+            print(f"Device: {x.device}")
+            print(f"x shape: {x.shape}, dtype: {x.dtype}")
+            print(f"Memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+            print(f"Memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+
         xyz = x[:, -3:]
         latent = x[:, :-3]
 
