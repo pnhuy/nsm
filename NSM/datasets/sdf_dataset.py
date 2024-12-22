@@ -203,6 +203,7 @@ def read_mesh_get_sampled_pts(
     results['orig_pts'] = [orig_mesh.point_coords]
 
     if (register_to_mean_first is True):
+        print('Registering mesh to mean mesh')
         # Rigid + scaling alginment of the original mesh to the mean mesh
         # of the model. This allows all downstream scaling to occur as expected
         # it also aligns the new bone with the mean/expected bone of the shape model
@@ -222,9 +223,11 @@ def read_mesh_get_sampled_pts(
         )
         results['icp_transform'] = icp_transform
     else:
+        print('No registration')
         results['icp_transform'] = None
     
     if (center_pts is True) or (norm_pts is True):
+        print('Scaling and centering mesh')
         center, scale, new_pts = get_pts_center_and_scale(
             np.copy(orig_mesh.point_coords),
             center=center_pts,
@@ -234,6 +237,7 @@ def read_mesh_get_sampled_pts(
         )
     
     else:
+        print('Not scaling or centering mesh - return original mesh')
         new_pts = np.copy(orig_mesh.point_coords)
         scale = 1
         center = np.zeros(3)
@@ -417,6 +421,7 @@ def read_meshes_get_sampled_pts(
             new_pts[idx] = new_mesh.point_coords
 
     else:
+        print('No registration')
         results['icp_transform'] = None
     
     toc = time.time()
@@ -607,6 +612,7 @@ class SDFSamples(torch.utils.data.Dataset):
         norm_pts=False,
         scale_method='max_rad',
         scale_jointly=False,
+        joint_scale_buffer=0.1,
         loc_save=os.environ['LOC_SDF_CACHE'],
         include_seed_in_hash=True,
         save_cache=True,
@@ -621,7 +627,7 @@ class SDFSamples(torch.utils.data.Dataset):
         n_processes=2,
         store_data_in_memory=False,
         debug_memory=False,
-
+        test_load_times=True,
     ):
         self.list_mesh_paths = list_mesh_paths
         self.subsample = subsample
@@ -635,6 +641,7 @@ class SDFSamples(torch.utils.data.Dataset):
         self.norm_pts = norm_pts
         self.scale_method = scale_method
         self.scale_jointly = scale_jointly
+        self.joint_scale_buffer = joint_scale_buffer
         self.loc_save = loc_save
         self.include_seed_in_hash = include_seed_in_hash
         self.random_seed = random_seed
@@ -651,6 +658,7 @@ class SDFSamples(torch.utils.data.Dataset):
         self.debug_memory = debug_memory
         self._memory_tracker = None
         self._memory_counter = 0
+        self.test_load_times = test_load_times
 
         # set defaults so can use same 'norm_and_scale_all_meshes' function
         # for single and multiple meshes
@@ -658,6 +666,9 @@ class SDFSamples(torch.utils.data.Dataset):
             self.reference_object = 0
         if not hasattr(self, 'n_meshes'):
             self.n_meshes = 1
+
+        self.max_radius = None
+        self.center = None
 
         # preprocess inputs before proceeding
         self.preprocess_inputs()
@@ -670,12 +681,12 @@ class SDFSamples(torch.utils.data.Dataset):
 
         # get the combinations of points and sigmas to sample
         self.pt_sample_combos = self.get_pt_sample_combos()
-
-        if self.reference_mesh is not None:
-            self.load_reference_mesh()
         
         # preallocate reference mesh path to None
         self.reference_mesh_path = None
+        
+        if self.reference_mesh is not None:
+            self.load_reference_mesh()
 
         # function to allow calling additional internal functions from subclasses. 
         self.run_before_loading_data()
@@ -759,43 +770,84 @@ class SDFSamples(torch.utils.data.Dataset):
         Now, all of the meshes are centered and scaled jointly so the anatomical surfaces should
         roughly be aligned, removing this as a source of variation.
         """
-        # get the center of all of the meshes
-        centers = []
-        for data in self.data:
-            # center around the reference object
-            xyz = data['new_pts'][self.reference_object]
-            center = np.mean(xyz, axis=0)
-            centers.append(center)
-        centers = np.stack(centers, axis=0)
-        center = np.mean(centers, axis=0).astype(np.float32)
+        print('Computing centering and scaling...')
+        # if not stored in memory, then get the centers and max radii from the data in memory
+        if self.store_data_in_memory is False:
+            print('Data not stored in memory... loading from disk')
+            tic = time.time()
+            centers = []
+            for data in self.data:
+                # load in the npz dict
+                data_ = np.load(data)
+                centers.append(np.mean(data_[f'new_pts_{self.reference_object}'], axis=0))
+            # new center:
+            center = np.mean(centers, axis=0)
+            
+            print('Done computing centers')
+            
+            max_radii = []
+            # for each data, comput the max radius (from the new/global center)
+            for data in self.data:
+                data_ = np.load(data)
+                max_radius = 0
+                for mesh_idx in range(self.n_meshes):
+                    xyz = data_[f'new_pts_{mesh_idx}']
+                    centered_xyz = xyz - center
+                    radii = np.linalg.norm(centered_xyz, axis=-1)
+                    max_radius_ = np.max(radii)
+                    if max_radius_ > max_radius:
+                        max_radius = max_radius_
+                max_radii.append(max_radius)
+            max_radius = np.max(max_radii)
+            # make the biggest radius a bit bigger than observed to enable model to 
+            # generalize to unseen data that is slightly larger than the observed data.
+            max_radius = max_radius * (1 + self.joint_scale_buffer)
+            print('Done computing max radii')
+            
+            self.max_radius = max_radius.astype(np.float32)
+            self.center = center.astype(np.float32)
+            toc = time.time()
+            print(f'Finished computing centering and scaling in {toc - tic:.3f}s')
+            print(f'\tMax radius: {self.max_radius}')
+            print(f'\tCenter: {self.center}')
+            
+        else: 
+            # get the center of all of the meshes
+            centers = []
+            for data in self.data:
+                # center around the reference object
+                xyz = data[f'new_pts_{self.reference_object}']
+                center = np.mean(xyz, axis=0)
+                centers.append(center)
+            centers = np.stack(centers, axis=0)
+            center = np.mean(centers, axis=0)
 
-        # subtract the center from all of the meshes
-        for idx, data in enumerate(self.data):
-            self.data[idx]['xyz'] -= center
-            # iterate over all of the meshes and subtract the center
-            for mesh_idx in range(self.n_meshes):
-                self.data[idx]['new_pts'][mesh_idx] -= center
-        
-        # get the max radius of all of the meshes
-        max_radii = 0
-        for data in self.data:
-            for mesh_idx in range(self.n_meshes):
-                xyz = data['new_pts'][mesh_idx]
-                max_radius = np.max(np.linalg.norm(xyz, axis=-1)).astype(np.float32)
-                if max_radius > max_radii:
-                    max_radii = max_radius
-        
-                
-        # divide all of the meshes by the max radius
-        for idx, data in enumerate(self.data):
-            self.data[idx]['xyz'] /= max_radii
-            # do the same for the sdf of each point
-            self.data[idx]['gt_sdf'] /= max_radii
-            # do the same for the original points
-            for mesh_idx in range(self.n_meshes):
-                self.data[idx]['new_pts'][mesh_idx] /= max_radii
+            # subtract the center from all of the meshes
+            for idx, data in enumerate(self.data):
+                self.data[idx]['xyz'] -= center
+                # iterate over all of the meshes and subtract the center
+                for mesh_idx in range(self.n_meshes):
+                    self.data[idx][f'new_pts_{mesh_idx}'] -= center
+            
+            # get the max radius of all of the meshes
+            max_radii = 0
+            for data in self.data:
+                for mesh_idx in range(self.n_meshes):
+                    xyz = data[f'new_pts_{mesh_idx}']
+                    max_radius = np.max(np.linalg.norm(xyz, axis=-1))
+                    if max_radius > max_radii:
+                        max_radii = max_radius
+            
+                    
+            # divide all of the meshes by the max radius
+            for idx, data in enumerate(self.data):
+                self.data[idx]['xyz'] /= max_radii
+                # do the same for the sdf of each point
+                self.data[idx]['gt_sdf'] /= max_radii
+                # do the same for the original points
+                for mesh_idx in range(self.n_meshes):
+                    self.data[idx][f'new_pts_{mesh_idx}'] /= max_radii
 
-        
     def preprocess_inputs(self):
         """
         Preprocess inputs to ensure they are in the correct format.
@@ -809,8 +861,11 @@ class SDFSamples(torch.utils.data.Dataset):
     
     def get_dict_pts(self, data, pts_name):
         dict_pts = {}
-        for idx_, orig_pts_ in enumerate(data[pts_name]):
-            dict_pts[f'{pts_name}_{idx_}'] = orig_pts_
+        if isinstance(data[pts_name], list):
+            for idx_, orig_pts_ in enumerate(data[pts_name]):
+                dict_pts[f'{pts_name}_{idx_}'] = orig_pts_
+        else:
+            dict_pts[f'{pts_name}_0'] = data[pts_name]
         return dict_pts
 
     def save_data_to_cache(self, data, file_hash, filepath=None):
@@ -828,7 +883,7 @@ class SDFSamples(torch.utils.data.Dataset):
         dict_pts.update(self.get_dict_pts(data, 'orig_pts'))
         dict_pts.update(self.get_dict_pts(data, 'new_pts'))
 
-        additional_keys = ['pos_idx', 'neg_idx', 'surf_idx']
+        additional_keys = ['pos_idx', 'neg_idx', 'surf_idx', 'center', 'max_radius', 'max_radius_xyz']
         for key in additional_keys:
             if key in data:
                 dict_pts.update(self.get_dict_pts(data, key))
@@ -848,6 +903,7 @@ class SDFSamples(torch.utils.data.Dataset):
         Returns:
             dict: Dictionary of sampled points and SDFs
         """
+        
 
         # Create hash and filename
         file_hash = self.create_hash(loc_mesh)
@@ -879,6 +935,7 @@ class SDFSamples(torch.utils.data.Dataset):
                     self.save_data_to_cache(data, file_hash, filepath=cached_file_)
                 
                 file_loaded = True
+                cache_path = cached_file_
                 break
             
         if file_loaded is False:
@@ -899,6 +956,10 @@ class SDFSamples(torch.utils.data.Dataset):
                     reference_mesh = None
             else:
                 reference_mesh = self.reference_mesh
+            
+            if self.verbose is True:
+                print('type of reference mesh:', type(reference_mesh))
+                print('ref mesh path:', self.reference_mesh_path)
 
             for idx_, (n_pts_, sigma_) in enumerate(self.pt_sample_combos):
                 result_ = read_mesh_get_sampled_pts(
@@ -929,8 +990,9 @@ class SDFSamples(torch.utils.data.Dataset):
                 pts_idx += n_pts_
 
                 if idx_ == 0:
-                    data['orig_pts'] = torch.from_numpy(result_['orig_pts']).float()
-                    data['new_pts'] = torch.from_numpy(result_['new_pts']).float()
+                    # Convert list of arrays to tensors
+                    data['orig_pts'] = [torch.from_numpy(pts).float() for pts in result_['orig_pts']]
+                    data['new_pts'] = [torch.from_numpy(pts).float() for pts in result_['new_pts']]
 
             pos_idx, neg_idx, surf_idx = self.sdf_pos_neg_idx(data)
             data['pos_idx'] = pos_idx
@@ -939,8 +1001,13 @@ class SDFSamples(torch.utils.data.Dataset):
 
             if self.save_cache is True:
                 self.save_data_to_cache(data, file_hash)
-
+                cache_path = os.path.join(self.cache_folder, f'{file_hash}.npz')
         
+        if self.store_data_in_memory is False:
+            if self.verbose is True:
+                print('updating data to be cache path')
+            # change the data to be the path to the saved cache file
+            data = cache_path
 
         return data
     
@@ -1014,6 +1081,9 @@ class SDFSamples(torch.utils.data.Dataset):
         Raises:
             TypeError: If reference mesh is not a string, list of strings, or mesh.Mesh object
         """
+        
+        if self.verbose is True:
+            print('Loading reference mesh: ', self.reference_mesh)
 
         if issubclass(type(self.reference_mesh), Mesh):
             pass
@@ -1035,7 +1105,10 @@ class SDFSamples(torch.utils.data.Dataset):
             self.reference_mesh = Mesh(self.reference_mesh[self.reference_object])
         else:
             raise TypeError('Reference mesh must be a string, list of strings, or mesh.Mesh object, not', type(self.reference_mesh))
-
+        
+        if self.verbose is True:
+            print('type of reference mesh:', type(self.reference_mesh))
+        
         if self.multiprocessing is True:
             self.reference_mesh_path = os.path.join(self.cache_folder, f'REFERENCE_MESH_{int(np.random.rand() * 1000000000)}.vtk')
             self.reference_mesh.save_mesh(self.reference_mesh_path)
@@ -1114,10 +1187,19 @@ class SDFSamples(torch.utils.data.Dataset):
             dict: Dictionary of the item
             idx (int): Index of the item
         """
+        
+        tic_whole_load = time.time()
 
         if self.store_data_in_memory is False:
             # if not storing in memory, then load from cache
+            tic = time.time()
             data_ = np.load(self.data[idx])
+            toc = time.time()
+            time_ = toc - tic
+            
+            # get size of the numpy file in mb
+            size = os.path.getsize(self.data[idx]) / 1e6
+
             if self.equal_pos_neg is True:
                 list_keys_unpack = ['pos_idx', 'neg_idx']
             else:
@@ -1135,14 +1217,14 @@ class SDFSamples(torch.utils.data.Dataset):
                 
                 # idx_pos = data_['pos_idx'].repeat(data_['pos_idx'].size(0)//samples_per_sign + 1)
                 # perm_pos = torch.randperm(idx_pos.size(0))
-                perm_pos = torch.randperm(data_['pos_idx'].size(0))[:samples_per_sign]
-                idx_pos = data_['pos_idx'][perm_pos]
+                perm_pos = torch.randperm(data_['pos_idx'][0].size(0))[:samples_per_sign]
+                idx_pos = data_['pos_idx'][0][perm_pos]
 
                 # idx_neg = data_['neg_idx'].repeat(data_['neg_idx'].size(0)//samples_per_sign + 1)
                 # perm_neg = torch.randperm(idx_neg.size(0))
                 # idx_neg = perm_neg[:samples_per_sign]
-                perm_neg = torch.randperm(data_['neg_idx'].size(0))[:samples_per_sign]
-                idx_neg = data_['neg_idx'][perm_neg]
+                perm_neg = torch.randperm(data_['neg_idx'][0].size(0))[:samples_per_sign]
+                idx_neg = data_['neg_idx'][0][perm_neg]
 
                 idx_ = torch.cat((idx_pos, idx_neg), dim=0)
 
@@ -1156,10 +1238,32 @@ class SDFSamples(torch.utils.data.Dataset):
                 perm = torch.randperm(data_['xyz'].size(0))
                 idx_ = perm[:self.subsample]
 
+            if self.verbose is True:
+                print('idx_ size:', idx_.size(), 'idx_ min:', idx_.min(),'idx_ max:', idx_.max())
+                print('equal neg pos', self.equal_pos_neg)
+            
+            # unpack the data
+            xyz = data_['xyz'][idx_, :]
+            sdf = data_['gt_sdf'][idx_]
+
+            if (self.max_radius is not None) and (self.center is not None):
+                # if normalizing at the group level, then normalize here. 
+                xyz = (xyz - self.center) / self.max_radius
+                sdf = sdf / self.max_radius
+                
             data_ = {
-                'xyz': data_['xyz'][idx_, :],
-                'gt_sdf': data_['gt_sdf'][idx_],
+                'xyz': xyz,
+                'gt_sdf': sdf,
             }
+            
+            toc_whole_load = time.time()
+            time_whole_load = toc_whole_load - tic_whole_load
+            
+            if self.test_load_times is True:
+                data_['time'] = time_
+                data_['size'] = size
+                data_['mb_per_sec'] = size / time_
+                data_['whole_load_time'] = time_whole_load
         
         return data_, idx
     
@@ -1188,6 +1292,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
         equal_pos_neg=True,
         fix_mesh=True,
         print_filename=False,
+        test_load_times=True,
 
         # Multi surface specific 
         scale_all_meshes=True,                  
@@ -1198,7 +1303,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
         multiprocessing=True,     
         debug_memory=False,
         n_processes=2,
-        test_load_times=True,
+        
     ):
         self.times = []
         self.data_size = []
@@ -1239,6 +1344,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
             multiprocessing=multiprocessing,
             n_processes=n_processes,
             debug_memory=debug_memory,
+            test_load_times=test_load_times,
         )
     
     def preprocess_inputs(self):
@@ -1297,6 +1403,8 @@ class MultiSurfaceSDFSamples(SDFSamples):
         file_loaded = False
 
         if (len(cached_file) > 0) and (self.load_cache is True):
+            if self.verbose is True:
+                print('Loading cached file')
             for cache_path in cached_file:
                 if not is_zipfile(cache_path):
                     print('DELETEING BAD ZIP FILE:', cache_path)
@@ -1366,6 +1474,10 @@ class MultiSurfaceSDFSamples(SDFSamples):
                     reference_mesh = None
             else:
                 reference_mesh = self.reference_mesh
+            
+            if self.verbose is True:
+                print('type of reference mesh:', type(reference_mesh))
+                print('ref mesh path:', self.reference_mesh_path)
 
             for idx_, (n_pts_, sigma_) in enumerate(self.pt_sample_combos):
                 tic = time.time()
@@ -1635,10 +1747,17 @@ class MultiSurfaceSDFSamples(SDFSamples):
             if self.verbose is True:
                 print('idx_ size:', idx_.size(), 'idx_ min:', idx_.min(),'idx_ max:', idx_.max())
                 print('equal neg pos', self.equal_pos_neg)
+            
+            xyz = data_['xyz'][idx_, :]
+            sdf = data_['gt_sdf'][idx_, :]
+
+            if (self.max_radius is not None) and (self.center is not None):
+                xyz = (xyz - self.center) / self.max_radius
+                sdf = sdf / self.max_radius
 
             data_ = {
-                'xyz': data_['xyz'][idx_, :],
-                'gt_sdf': data_['gt_sdf'][idx_, :],
+                'xyz': xyz,
+                'gt_sdf': sdf,
             }
 
             toc_whole_load = time.time()
