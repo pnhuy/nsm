@@ -210,32 +210,38 @@ def reconstruct_latent(
                 print('not changing... ', n_samples_)
 
             if n_samples_ != xyz.shape[0]:
-                # Below if/else is just to get a list of indices to sample
                 if len(sdf_gt) > 1:
                     # get equal number of samples from each surface
                     # the list pts_surface is a list that indicates
                     # which surface each point in xyz belongs to
                     n_samples_per = n_samples_ // len(sdf_gt)
                     # pre allocate array to store random samples
+                    if verbose is True:
+                        print(f"n_samples_per: {n_samples_per}")
+                    
                     rand_samp = torch.empty(n_samples_, dtype=torch.int64, device=torch.device(device))
+                    current_filled = 0
+                    
                     for idx in range(len(sdf_gt)):
                         # get the locations of the points that belong to the current surface
                         pts_ = (pts_surface == idx).nonzero(as_tuple=True)[0]
-                        # get a random permutation of the points
+                        if verbose is True:
+                            print(f"Surface {idx} has {pts_.shape[0]} points")
+                        
                         perm = torch.randperm(pts_.shape[0])
-                        # get the randomly permuted indices from this surface
                         pts_ = pts_[perm[:n_samples_per]]
-                        # store the points in the pre-allocated rand_samp array
-                        rand_samp[idx*n_samples_per:(idx+1)*n_samples_per] = pts_
-                    
-                    if len(rand_samp) < n_samples_:
-                        # if we don't have enough points, then just take random points
-                        perm = torch.randperm(xyz.shape[0])
-                        _idx_ = perm[:n_samples_-len(rand_samp)]
-                        rand_samp = torch.cat([rand_samp, _idx_], dim=0)
+                        
+                        start_idx = current_filled
+                        end_idx = start_idx + n_samples_per
+                        rand_samp[start_idx:end_idx] = pts_
+                        current_filled = end_idx
+                    if current_filled < n_samples_:
+                        remaining = n_samples_ - current_filled
+                        perm = torch.randperm(xyz.shape[0])[:remaining]
+                        rand_samp[current_filled:] = perm
                 else:
                     rand_samp = torch.randperm(xyz.shape[0])[:n_samples_]
-
+                
                 # Use rand_samp indices to get xyz and sdf_gt
                 xyz_input = xyz[rand_samp, ...]
                 sdf_gt_ = [x[rand_samp, ...] for x in sdf_gt]
