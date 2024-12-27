@@ -1213,6 +1213,7 @@ class SDFSamples(torch.utils.data.Dataset):
 
         if self.subsample is not None:
             if self.equal_pos_neg is True:
+                tic_rand_sample = time.time()
                 samples_per_sign = int(self.subsample/2)
                 
                 # idx_pos = data_['pos_idx'].repeat(data_['pos_idx'].size(0)//samples_per_sign + 1)
@@ -1225,14 +1226,25 @@ class SDFSamples(torch.utils.data.Dataset):
                 # idx_neg = perm_neg[:samples_per_sign]
                 perm_neg = torch.randperm(data_['neg_idx'][0].size(0))[:samples_per_sign]
                 idx_neg = data_['neg_idx'][0][perm_neg]
+                toc_rand_sample = time.time()
+                if self.verbose is True:
+                    print(f'rand sample time: {toc_rand_sample - tic_rand_sample}s')
 
+                tic_cat = time.time()
                 idx_ = torch.cat((idx_pos, idx_neg), dim=0)
+                toc_cat = time.time()
+                if self.verbose is True:
+                    print(f'concat time: {toc_cat - tic_cat}s')
 
                 if len(idx_) < self.subsample:
                     # if we don't have enough points, then just take random points
+                    tic_rand = time.time()
                     perm = torch.randperm(data_['xyz'].size(0))
                     _idx_ = perm[:self.subsample-len(idx_)]
                     idx_ = torch.cat([idx_, _idx_], dim=0)
+                    toc_rand = time.time()
+                    if self.verbose is True:
+                        print(f'rand additional sub sample time: {toc_rand - tic_rand}s')
             
             else:
                 perm = torch.randperm(data_['xyz'].size(0))
@@ -1247,9 +1259,13 @@ class SDFSamples(torch.utils.data.Dataset):
             sdf = data_['gt_sdf'][idx_]
 
             if (self.max_radius is not None) and (self.center is not None):
-                # if normalizing at the group level, then normalize here. 
+                # if normalizing at the group level, then normalize here.
+                tic_norm = time.time()
                 xyz = (xyz - self.center) / self.max_radius
                 sdf = sdf / self.max_radius
+                toc_norm = time.time()
+                if self.verbose is True:
+                    print(f'norm time: {toc_norm - tic_norm}s')
                 
             data_ = {
                 'xyz': xyz,
@@ -1692,7 +1708,11 @@ class MultiSurfaceSDFSamples(SDFSamples):
                 list_keys_unpack = ['pos_idx', 'neg_idx']
             else:
                 list_keys_unpack = []
+            tic_unpack = time.time()
             data_ = unpack_numpy_data(data_, list_additional_keys=list_keys_unpack)
+            toc_unpack = time.time()
+            if self.verbose is True:
+                print(f'unpack time: {toc_unpack - tic_unpack}s')
 
         elif self.store_data_in_memory is True:
             # if storing in memory, then just get the data
@@ -1708,6 +1728,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
                 # samples_per_mesh = [int((n_pts_/self.total_n_pts) * self.subsample) for n_pts_ in self.n_pts]
                 idx_ = []
                 for mesh_idx, samples_per_sign in enumerate(self.samples_per_sign_):
+                    tic_mesh = time.time()
                     # get number of positive and negative points for this mesh
                     # samples_per_sign = int(subsample_/2)
                     if self.verbose is True:
@@ -1729,16 +1750,26 @@ class MultiSurfaceSDFSamples(SDFSamples):
 
                     # combine positive and negative indices
                     idx_ += [idx_pos, idx_neg]
-                    
+                    toc_mesh = time.time()
+                    if self.verbose is True:
+                        print(f'mesh {mesh_idx} time: {toc_mesh - tic_mesh}s')
                 
+                tic_cat = time.time()
                 # combine indices for all meshes
                 idx_ = torch.cat(idx_, dim=0)
+                toc_cat = time.time()
+                if self.verbose is True:
+                    print(f'cat time: {toc_cat - tic_cat}s')
 
                 if len(idx_) < self.subsample:
                     # if we don't have enough points, then just take random points
+                    tic_rand = time.time()
                     perm = torch.randperm(data_['xyz'].size(0))
                     _idx_ = perm[:self.subsample-len(idx_)]
                     idx_ = torch.cat([idx_, _idx_], dim=0)
+                    toc_rand = time.time()
+                    if self.verbose is True:
+                        print(f'rand additional sub sample time: {toc_rand - tic_rand}s')
                 
             else:
                 perm = torch.randperm(data_['xyz'].size(0))
@@ -1752,8 +1783,12 @@ class MultiSurfaceSDFSamples(SDFSamples):
             sdf = data_['gt_sdf'][idx_, :]
 
             if (self.max_radius is not None) and (self.center is not None):
+                tic_scaling = time.time()
                 xyz = (xyz - self.center) / self.max_radius
                 sdf = sdf / self.max_radius
+                toc_scaling = time.time()
+                if self.verbose is True:
+                    print(f'scaling time: {toc_scaling - tic_scaling}s')
 
             data_ = {
                 'xyz': xyz,
