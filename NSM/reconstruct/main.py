@@ -52,11 +52,11 @@ def reconstruct_latent_sdf_gt_type_check(sdf_gt, verbose=False):
 
     return sdf_gt
 
-def reconstruct_latent_pts_surface_type_check(pts_surface, verbose=False):
+def reconstruct_latent_pts_surface_type_check(pts_surface, verbose=False, device='cuda'):
     if isinstance(pts_surface, (list, tuple)):
-        pts_surface = torch.tensor(pts_surface).cuda()
+        pts_surface = torch.tensor(pts_surface).to(device)
     elif isinstance(pts_surface, np.ndarray):
-        pts_surface = torch.from_numpy(pts_surface).cuda()
+        pts_surface = torch.from_numpy(pts_surface).to(device)
     elif isinstance(pts_surface, torch.Tensor):
         pass
     else:
@@ -128,7 +128,7 @@ def reconstruct_latent(
 ):
     
     sdf_gt = reconstruct_latent_sdf_gt_type_check(sdf_gt, verbose=verbose)
-    pts_surface = reconstruct_latent_pts_surface_type_check(pts_surface, verbose=verbose)
+    pts_surface = reconstruct_latent_pts_surface_type_check(pts_surface, verbose=verbose, device=device)
     decoders = reconstruct_latent_decoders_type_check(decoders)
     adjust_lr_every = reconstruct_latent_get_lr_update_freq(n_lr_updates, num_iterations)
 
@@ -151,7 +151,7 @@ def reconstruct_latent(
     
 
     # Initialize random latent vector directly on GPU
-    latent = torch.ones(1, latent_size, device=torch.device('cuda')).normal_(mean=latent_init_mean, std=latent_init_std)
+    latent = torch.ones(1, latent_size, device=device).normal_(mean=latent_init_mean, std=latent_init_std)
     latent.requires_grad = True
     latent_input = latent.expand(n_samples, -1)
 
@@ -437,7 +437,8 @@ def reconstruct_mesh(
     func=None,
     fix_mesh=True,
     return_registration_params=False,
-    return_timing=False
+    return_timing=False,
+    device='cuda'
 ):
     """
     Reconstructs mesh at path using decoders. 
@@ -483,12 +484,13 @@ def reconstruct_mesh(
         # create mean mesh, assume that using decoder_0 & mesh_0, but
         # technically this can be specified.
         mean_mesh = create_mesh(
-            decoder=decoders[decoder_to_scale].cuda(),
-            latent_vector=mean_latent.cuda(),
+            decoder=decoders[decoder_to_scale].to(device),
+            latent_vector=mean_latent.to(device),
             n_pts_per_axis=n_pts_per_axis_mean_mesh,
             objects=objects_per_decoder[decoder_to_scale],
             batch_size=batch_size,
             verbose=verbose,
+            device=device,
         )
 
         if objects_per_decoder[decoder_to_scale] > 1:
@@ -614,7 +616,8 @@ def reconstruct_mesh(
         'difficulty_weight': difficulty_weight_recon,
         'pts_surface': pts_surface,
         'max_n_samples': max_n_samples_latent_recon, 
-        'n_steps_sample_ramp': n_steps_sample_ramp_latent_recon
+        'n_steps_sample_ramp': n_steps_sample_ramp_latent_recon,
+        'device': device,
     }
 
 
@@ -636,8 +639,8 @@ def reconstruct_mesh(
         # pass alignment parameters to return mesh to original position
         # pass number of objects in case decoder is a multi-object decoder
         mesh = create_mesh(
-            decoder=decoder.cuda(),
-            latent_vector=latent.cuda(),
+            decoder=decoder.to(device),
+            latent_vector=latent.to(device),
             n_pts_per_axis=n_pts_per_axis,
             path_original_mesh=None,
             offset=result_['center'],
@@ -645,6 +648,7 @@ def reconstruct_mesh(
             icp_transform=result_['icp_transform'],
             objects=objects_per_decoder[decoder_idx],
             verbose=verbose,
+            device=device,
         )
         if objects_per_decoder[decoder_idx] > 1:
             # append sequentially so they match the order of meshes at "path"
@@ -807,6 +811,7 @@ def get_mean_errors(
 
     scale_jointly=False,
     fix_mesh=True,
+    device='cuda'
 ):
     """
     Reconstruct meshes & compute errors    
@@ -822,7 +827,8 @@ def get_mean_errors(
         'register_similarity':register_similarity,
         'scale_jointly':scale_jointly,
         'scale_all_meshes':scale_all_meshes,
-        'return_latent': True
+        'return_latent': True,
+        'device': device,
     }
 
     if model_type == 'deepsdf':

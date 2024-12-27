@@ -73,7 +73,6 @@ def sdf_gradients(sdf_model, points, latent, verbose=False):
         p.grad.zero_()
         grad_output[:, i] = 0.0
         if verbose is True:
-            print('SDF gradient step, GPU Usage:')
             print_gpu_memory()
 
     return gradients, sdf_values.detach().cpu()

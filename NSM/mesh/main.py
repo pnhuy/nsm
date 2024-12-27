@@ -78,7 +78,8 @@ def create_mesh(
     scale_to_original_mesh=True,
     icp_transform=None,
     objects=1,
-    verbose=False
+    verbose=False,
+    device='cuda'
 ):
 
     if voxel_size is None:
@@ -87,7 +88,7 @@ def create_mesh(
     decoder.eval()
 
     samples = create_grid_samples(n_pts_per_axis, voxel_origin, voxel_size)
-    sdf_values_ = get_sdfs(decoder, samples, latent_vector, batch_size, objects=objects)
+    sdf_values_ = get_sdfs(decoder, samples, latent_vector, batch_size, objects=objects, device=device)
 
     # resample SDFs into a grid:
     sdf_values = torch.zeros((n_pts_per_axis, n_pts_per_axis, n_pts_per_axis, objects))
@@ -198,7 +199,7 @@ def create_grid_samples(
 
     return samples
 
-def get_sdfs(decoder, samples, latent_vector, batch_size=32**3, objects=1):
+def get_sdfs(decoder, samples, latent_vector, batch_size=32**3, objects=1, device='cuda'):
 
     n_pts_total = samples.shape[0]
 
@@ -207,7 +208,7 @@ def get_sdfs(decoder, samples, latent_vector, batch_size=32**3, objects=1):
 
     while current_idx < n_pts_total:
         current_batch_size = min(batch_size, n_pts_total - current_idx)
-        sampled_pts = samples[current_idx : current_idx + current_batch_size, :3].cuda()
+        sampled_pts = samples[current_idx : current_idx + current_batch_size, :3].to(device)
         sdf_values[current_idx : current_idx + current_batch_size, :] = decode_sdf(
             decoder, latent_vector, sampled_pts
         ).detach().cpu()

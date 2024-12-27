@@ -7,6 +7,7 @@ from NSM.utils import (
     get_optimizer,
     get_latent_vecs,
     get_checkpoints,
+    clear_gpu_cache,
 )
 from NSM.reconstruct import (
     get_mean_errors, 
@@ -32,6 +33,7 @@ import torch
 import time
 import numpy as np
 import itertools
+import warnings
 
 
 DICT_VALIDATION_FUNCS = {
@@ -91,7 +93,7 @@ def train_deep_sdf(
         pin_memory=True 
     )
 
-    latent_vecs = get_latent_vecs(len(data_loader.dataset), config).cuda()
+    latent_vecs = get_latent_vecs(len(data_loader.dataset), config).to(config['device'])
     optimizer = get_optimizer(model, latent_vecs, lr_schedules=config['lr_schedules'], optimizer=config["optimizer"], weight_decay=config["weight_decay"])
     
     if config['resume_epoch'] > 1:
@@ -167,58 +169,59 @@ def train_deep_sdf(
                 )
             
             if val_epoch:
-                    torch.cuda.empty_cache()
-                    
-                    # TODO: Change this to just accept the config? 
-                    # or... update all parameters to be the same in the config and the function call?
-                    # this will just allow unpacking of the config dict.
-                    dict_loss = get_mean_errors(
-                        mesh_paths=config['val_paths'],
-                        decoders=model,
-                        num_iterations=config['num_iterations_recon'],
-                        register_similarity=True,
-                        latent_size=config['latent_size'],
-                        lr=config['lr_recon'],
-                        # loss_weight
-                        # loss_type
-                        l2reg=config['l2reg_recon'],
-                        # latent_init_std
-                        # latent_init_mean
-                        clamp_dist=config['clamp_dist_recon'],
-                        # latent_reg_weight
-                        n_lr_updates=config['n_lr_updates_recon'],
-                        lr_update_factor=config['lr_update_factor_recon'],
-                        calc_symmetric_chamfer=config['chamfer'],
-                        calc_assd=config['assd'],
-                        calc_emd=config['emd'],
-                        convergence=config['convergence_type_recon'],
-                        convergence_patience=config['convergence_patience_recon'],
-                        # log_wandb
-                        verbose=config['verbose'],
-                        objects_per_decoder=config["objects_per_decoder"],
-                        batch_size_latent_recon=config['batch_size_latent_recon'],
-                        get_rand_pts=config['get_rand_pts_recon'],
-                        n_pts_random=config['n_pts_random_recon'],
-                        sigma_rand_pts=config['sigma_rand_pts_recon'],
-                        n_samples_latent_recon=config['n_samples_latent_recon'], 
-                        # difficulty_weight_recon
-                        # chamfer_norm
-                        scale_all_meshes=True,
-                        recon_func=None if (('recon_val_func_name' not in config)) else DICT_VALIDATION_FUNCS[config['recon_val_func_name']],
-                        predict_val_variables=None if ('predict_val_variables' not in config) else config['predict_val_variables'],
+                clear_gpu_cache(config['device'])
+                
+                # TODO: Change this to just accept the config? 
+                # or... update all parameters to be the same in the config and the function call?
+                # this will just allow unpacking of the config dict.
+                dict_loss = get_mean_errors(
+                    mesh_paths=config['val_paths'],
+                    decoders=model,
+                    num_iterations=config['num_iterations_recon'],
+                    register_similarity=True,
+                    latent_size=config['latent_size'],
+                    lr=config['lr_recon'],
+                    # loss_weight
+                    # loss_type
+                    l2reg=config['l2reg_recon'],
+                    # latent_init_std
+                    # latent_init_mean
+                    clamp_dist=config['clamp_dist_recon'],
+                    # latent_reg_weight
+                    n_lr_updates=config['n_lr_updates_recon'],
+                    lr_update_factor=config['lr_update_factor_recon'],
+                    calc_symmetric_chamfer=config['chamfer'],
+                    calc_assd=config['assd'],
+                    calc_emd=config['emd'],
+                    convergence=config['convergence_type_recon'],
+                    convergence_patience=config['convergence_patience_recon'],
+                    # log_wandb
+                    verbose=config['verbose'],
+                    objects_per_decoder=config["objects_per_decoder"],
+                    batch_size_latent_recon=config['batch_size_latent_recon'],
+                    get_rand_pts=config['get_rand_pts_recon'],
+                    n_pts_random=config['n_pts_random_recon'],
+                    sigma_rand_pts=config['sigma_rand_pts_recon'],
+                    n_samples_latent_recon=config['n_samples_latent_recon'], 
+                    # difficulty_weight_recon
+                    # chamfer_norm
+                    scale_all_meshes=True,
+                    recon_func=None if (('recon_val_func_name' not in config)) else DICT_VALIDATION_FUNCS[config['recon_val_func_name']],
+                    predict_val_variables=None if ('predict_val_variables' not in config) else config['predict_val_variables'],
 
-                        scale_jointly=config['scale_jointly'],
-                        fix_mesh=config['fix_mesh_recon'],
-                    )
+                    scale_jointly=config['scale_jointly'],
+                    fix_mesh=config['fix_mesh_recon'],
+                    device=config['device']
+                )
 
-                    log_dict.update(dict_loss)
+                log_dict.update(dict_loss)
 
             if use_wandb is True:                    
                 wandb.log(log_dict, step=epoch-1)
             
             profiler.step()
 
-            torch.cuda.empty_cache()
+            clear_gpu_cache(config['device'])
         
     return
 
@@ -264,13 +267,13 @@ def train_epoch(
             print('xyz data size:', sdf_data['xyz'].size())
             print('sdf gt size:', sdf_data['gt_sdf'].size())
                 
-        xyz = sdf_data['xyz'].cuda()
+        xyz = sdf_data['xyz'].to(config['device'])
         xyz = xyz.reshape(-1, 3)
 
         num_sdf_samples = xyz.shape[0]
         xyz.requires_grad = False
 
-        indices = indices.cuda()
+        indices = indices.to(config['device'])
         
         sdf_gt = []
         if n_surfaces == 1:
@@ -358,7 +361,7 @@ def train_epoch(
                     print('pred_sdf shape', pred_sdf.shape)
                     print('unsqueezed pred_sdf shape', pred_sdf[:, surf_idx].shape)
                     print('sdf_gt shape', sdf_gt[surf_idx][split_idx].shape)
-                l1_losses.append(loss_l1(pred_sdf[:, surf_idx], sdf_gt[surf_idx][split_idx].squeeze(1).cuda()))
+                l1_losses.append(loss_l1(pred_sdf[:, surf_idx], sdf_gt[surf_idx][split_idx].squeeze(1).to(config['device'])))
 
             if config.get('multi_object_overlap', False) == True:
                 raise Exception('Not implemented yet')
@@ -389,26 +392,10 @@ def train_epoch(
                     # Weights points independently
                     # so, if hard for one surface - then we weight it heavily, but if
                     # easy for another surface - then we weight it less.
-                    error_sign = torch.sign(surf_gt_[split_idx].squeeze(1).cuda() - pred_sdf[:, surf_idx])
-                    sdf_gt_sign = torch.sign(surf_gt_[split_idx].squeeze(1).cuda())
+                    error_sign = torch.sign(surf_gt_[split_idx].squeeze(1).to(config['device']) - pred_sdf[:, surf_idx])
+                    sdf_gt_sign = torch.sign(surf_gt_[split_idx].squeeze(1).to(config['device']))
                     sample_weights = 1 + difficulty_weight * sdf_gt_sign * error_sign
                     l1_losses[surf_idx] = l1_losses[surf_idx] * sample_weights
-
-            # elif config['sample_difficulty_lx'] is not None:
-            #     weight_schedule = calc_weight(epoch, config['n_epochs'], config['sample_difficulty_lx_schedule'], config['sample_difficulty_lx_cooldown'])
-            #     for surf_idx, surf_gt_ in enumerate(sdf_gt):
-            #         difficulty_weight = 1 / (l1_losses[surf_idx] ** config['sample_difficulty_lx']  + config['sample_difficulty_lx_epsilon'])
-            #         difficulty_weight = difficulty_weight * weight_schedule
-            #         l1_losses[surf_idx] = l1_losses[surf_idx] * difficulty_weight
-                    
-            # elif config['hard_sample_difficulty_power'] is not None:
-            #     weight_schedule = calc_weight(epoch, config['n_epochs'], config['hard_sample_difficulty_schedule'], config['hard_sample_difficulty_cooldown'])
-
-            #     for surf_idx, surf_gt_ in enumerate(sdf_gt):
-            #         weight = 1 + config['hard_sample_difficulty_alpha'] * (-1 * surf_gt_[split_idx].squeeze(1).cuda() * pred_sdf[:, surf_idx])
-            #         weight = torch.clamp(weight, min=0)
-            #         weight = weight ** (config['hard_sample_difficulty_power'] * weight_schedule)
-            #         l1_losses[surf_idx] = l1_losses[surf_idx] * weight
                     
             # Weight each surface loss by the number of samples it has
             # so that the sum of them all is the same as the mean loss. 
@@ -475,7 +462,7 @@ def train_epoch(
                     anneal_weight = cyclic_anneal_linear(epoch=epoch, n_epochs=config['n_epochs'])
                     reg_loss = reg_loss * anneal_weight
 
-                chunk_loss = chunk_loss + reg_loss.cuda()
+                chunk_loss = chunk_loss + reg_loss.to(config['device'])
                 batch_code_reg_loss += reg_loss.item()
             
             mean_vec_length = torch.mean(torch.norm(batch_vecs, dim=1))

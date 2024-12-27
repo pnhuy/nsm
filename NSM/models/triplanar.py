@@ -290,8 +290,10 @@ class TriplanarDecoder(nn.Module):
             print('Epoch: ', epoch)
             print(f"Device: {x.device}")
             print(f"x shape: {x.shape}, dtype: {x.dtype}")
-            print(f"Memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-            print(f"Memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+            # if x is on cuda, print memory allocated and cached
+            if x.device.type == 'cuda':
+                print(f"Memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+                print(f"Memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
 
         xyz = x[:, -3:]
         latent = x[:, :-3]

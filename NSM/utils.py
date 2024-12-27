@@ -3,6 +3,7 @@ import os
 import math
 import json
 import schedulefree
+import warnings
 
 
 class LearningRateSchedule:
@@ -237,9 +238,22 @@ def is_jsonable(x):
 def filter_non_jsonable(dict_obj):
     return {k: v for k, v in dict_obj.items() if is_jsonable(v)}
 
-
 def print_gpu_memory():
-    allocated = torch.cuda.memory_allocated()
-    cached = torch.cuda.memory_reserved()
-    print(f"\tAllocated memory: {allocated / 1024**3:.2f} GB")
-    print(f"\tCached memory: {cached / 1024**3:.2f} GB")
+    # assert cuda is available
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated()
+        cached = torch.cuda.memory_reserved()
+        print('CUDA, GPU Usage:')
+        print(f"\tAllocated memory: {allocated / 1024**3:.2f} GB")
+        print(f"\tCached memory: {cached / 1024**3:.2f} GB")
+    else:
+        print('CUDA not available - GPU stats not available')
+    
+
+def clear_gpu_cache(device):
+    if 'cuda' in device:
+        torch.cuda.empty_cache()
+    elif 'mps' in device:
+        torch.mps.empty_cache()
+    else:
+        warnings.warn('Not clearing cache because not cuda or mps (apple metal)')
