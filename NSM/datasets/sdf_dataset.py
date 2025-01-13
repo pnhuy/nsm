@@ -198,6 +198,8 @@ def read_mesh_get_sampled_pts(
     if fix_mesh is True:
         meshfix(orig_mesh)
     
+    new_mesh = orig_mesh.copy()
+    
     # return orig_pts expanded dims for compatibility when storing
     # multiple meshes in the same dictionary
     results['orig_pts'] = [orig_mesh.point_coords]
@@ -214,7 +216,7 @@ def read_mesh_get_sampled_pts(
         icp_transform = orig_mesh.rigidly_register(
             other_mesh=mean_mesh,
             as_source=True,
-            apply_transform_to_mesh=True,
+            apply_transform_to_mesh=False,
             return_transformed_mesh=False,
             max_n_iter=100,
             n_landmarks=1000,
@@ -222,28 +224,27 @@ def read_mesh_get_sampled_pts(
             return_transform=True,
         )
         results['icp_transform'] = icp_transform
+        new_mesh.apply_transform_to_mesh(icp_transform)
     else:
         print('No registration')
         results['icp_transform'] = None
-    
+        
     if (center_pts is True) or (norm_pts is True):
         print('Scaling and centering mesh')
         center, scale, new_pts = get_pts_center_and_scale(
-            np.copy(orig_mesh.point_coords),
+            np.copy(new_mesh.point_coords),
             center=center_pts,
             scale=norm_pts,
             scale_method=scale_method,
             return_pts=True
         )
-    
+        new_mesh.point_coords = new_pts
     else:
-        print('Not scaling or centering mesh - return original mesh')
-        new_pts = np.copy(orig_mesh.point_coords)
+        print('Not scaling or centering mesh')
         scale = 1
         center = np.zeros(3)
+        new_pts = new_mesh.point_coords
     
-    new_mesh = orig_mesh.copy()
-    new_mesh.point_coords = new_pts
 
     results['new_pts'] = [new_pts]
 
