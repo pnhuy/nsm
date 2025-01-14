@@ -150,6 +150,7 @@ def read_mesh_get_sampled_pts(
     mean_mesh=None,
     fix_mesh=True,
     include_surf_in_pts=False,
+    uniform_pts_buffer=0.0,
     # Single mesh specific
     return_point_cloud=False,
     **kwargs,
@@ -253,13 +254,16 @@ def read_mesh_get_sampled_pts(
             rand_pts = new_mesh.rand_pts_around_surface(n_pts=n_pts, surface_method='random', distribution=rand_function, sigma=sigma)
         else:
             mins, maxs = get_cube_mins_maxs(new_pts)
+            mins = mins - uniform_pts_buffer/2 * (maxs-mins)
+            maxs = maxs + uniform_pts_buffer/2 * (maxs-mins)
             rand_pts = get_rand_uniform_pts(n_pts, mins=mins, maxs=maxs)
         
         if include_surf_in_pts is True:
             rand_pts = np.concatenate([rand_pts, new_pts], axis=0)
 
         if norm_pts is True:
-            rand_pts = np.clip(rand_pts, -1, 1)
+            clip_val = 1.0 + uniform_pts_buffer/2
+            rand_pts = np.clip(rand_pts, -clip_val, clip_val)
 
         rand_sdf = new_mesh.get_sdf_pts(pts=rand_pts, method='pcu')
 
@@ -350,6 +354,7 @@ def read_meshes_get_sampled_pts(
     mesh_to_scale=0,
     verbose=False,
     icp_transform=None,
+    uniform_pts_buffer=0.0,
     **kwargs,
 ):
     """
@@ -483,6 +488,8 @@ def read_meshes_get_sampled_pts(
         if None in sigma:
             pts_cube = np.concatenate(new_pts, axis=0)
             mins, maxs = get_cube_mins_maxs(pts_cube)
+            mins = mins - uniform_pts_buffer/2 * (maxs-mins)
+            maxs = maxs + uniform_pts_buffer/2 * (maxs-mins)
 
         for new_pts_idx, new_mesh_ in enumerate(new_meshes):
             if n_pts[new_pts_idx]  > 0:
@@ -629,6 +636,7 @@ class SDFSamples(torch.utils.data.Dataset):
         store_data_in_memory=False,
         debug_memory=False,
         test_load_times=True,
+        uniform_pts_buffer=0.0,
     ):
         self.list_mesh_paths = list_mesh_paths
         self.subsample = subsample
@@ -660,6 +668,7 @@ class SDFSamples(torch.utils.data.Dataset):
         self._memory_tracker = None
         self._memory_counter = 0
         self.test_load_times = test_load_times
+        self.uniform_pts_buffer = uniform_pts_buffer
 
         # set defaults so can use same 'norm_and_scale_all_meshes' function
         # for single and multiple meshes
@@ -978,6 +987,7 @@ class SDFSamples(torch.utils.data.Dataset):
                     fix_mesh=self.fix_mesh,
                     register_to_mean_first=False if reference_mesh is None else True,
                     mean_mesh=reference_mesh,
+                    uniform_pts_buffer=self.uniform_pts_buffer,
                 )
 
                 if result_ is None:
@@ -1310,6 +1320,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
         fix_mesh=True,
         print_filename=False,
         test_load_times=True,
+        uniform_pts_buffer=0.0,
 
         # Multi surface specific 
         scale_all_meshes=True,                  
@@ -1362,6 +1373,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
             n_processes=n_processes,
             debug_memory=debug_memory,
             test_load_times=test_load_times,
+            uniform_pts_buffer=uniform_pts_buffer,
         )
     
     def preprocess_inputs(self):
@@ -1510,7 +1522,8 @@ class MultiSurfaceSDFSamples(SDFSamples):
                     get_random=True,
                     fix_mesh=self.fix_mesh,
                     register_to_mean_first=False if reference_mesh is None else True,  #
-                    mean_mesh=reference_mesh,  # 
+                    mean_mesh=reference_mesh,  #
+                    uniform_pts_buffer=self.uniform_pts_buffer,
                     
                     # Multi surface specific
                     mesh_to_scale=self.mesh_to_scale,
