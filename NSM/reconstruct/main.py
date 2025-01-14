@@ -438,7 +438,8 @@ def reconstruct_mesh(
     fix_mesh=True,
     return_registration_params=False,
     return_timing=False,
-    device='cuda'
+    device='cuda',
+    recon_grid_origin=1.0,
 ):
     """
     Reconstructs mesh at path using decoders. 
@@ -642,6 +643,8 @@ def reconstruct_mesh(
             decoder=decoder.to(device),
             latent_vector=latent.to(device),
             n_pts_per_axis=n_pts_per_axis,
+            voxel_origin=(-recon_grid_origin, -recon_grid_origin, -recon_grid_origin),
+            voxel_size=recon_grid_origin*2 / (n_pts_per_axis - 1),
             path_original_mesh=None,
             offset=result_['center'],
             scale=result_['scale'],
