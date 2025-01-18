@@ -23,3 +23,6 @@ einops
 scikit-image
 pandas
 pymeshfix
+
+schedulefree
+pympler
