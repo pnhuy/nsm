@@ -14,6 +14,8 @@ from multiprocessing import Pool
 import multiprocessing
 import zipfile
 import gc
+from tqdm.auto import tqdm
+
 try:
     from pympler import tracker, muppy #asizeof, summary, muppy, tracker
 except ModuleNotFoundError:
@@ -21,7 +23,6 @@ except ModuleNotFoundError:
 
 
 
-today_date = datetime.now().strftime("%b_%d_%Y")
 
 def get_rand_uniform_pts(n_pts, mins=(-1, -1, -1), maxs=(1, 1, 1)):
     """
@@ -563,6 +564,12 @@ def read_meshes_get_sampled_pts(
 
     return results
 
+# Global wrapper function
+def load_mesh_step_wrapper(args):
+    """Wrapper function to unpack arguments."""
+    instance, loc_mesh, verbose = args
+    return instance.load_mesh_step(loc_mesh, verbose)
+
 
 class SDFSamples(torch.utils.data.Dataset):
     """
@@ -613,7 +620,7 @@ class SDFSamples(torch.utils.data.Dataset):
         scale_method='max_rad',
         scale_jointly=False,
         joint_scale_buffer=0.1,
-        loc_save=os.environ['LOC_SDF_CACHE'],
+        loc_save=os.environ.get('LOC_SDF_CACHE', "/tmp"),
         include_seed_in_hash=True,
         save_cache=True,
         load_cache=True,
@@ -676,7 +683,7 @@ class SDFSamples(torch.utils.data.Dataset):
         self.list_hash_params = self.get_hash_params()
 
         if save_cache is True:
-            self.cache_folder = os.path.join(self.loc_save, today_date)
+            self.cache_folder = self.loc_save
             os.makedirs(self.cache_folder, exist_ok=True)
 
         # get the combinations of points and sigmas to sample
@@ -695,11 +702,16 @@ class SDFSamples(torch.utils.data.Dataset):
         # Wrap this loading loop in a multiprocessing pool
         print(f'CPU affinity:{os.sched_getaffinity(0)}') 
         if self.multiprocessing is True:
-            list_inputs = [(loc_mesh, self.verbose) for loc_mesh in self.list_mesh_paths]
+            list_inputs = [(self, loc_mesh, self.verbose) for loc_mesh in self.list_mesh_paths]
             with Pool(processes=self.n_processes) as pool:
-                self.data = pool.starmap(self.load_mesh_step, list_inputs)
+                # self.data = list(tqdm(pool.starmap(self.load_mesh_step, list_inputs), total=len(list_inputs)))
+                results = []
+                for result in tqdm(pool.imap_unordered(load_mesh_step_wrapper, list_inputs), total=len(list_inputs), desc="Processing meshes"):
+                    results.append(result)
+                self.data = results
+
         else:
-            self.data = [self.load_mesh_step(loc_mesh, self.verbose) for loc_mesh in self.list_mesh_paths]
+            self.data = [self.load_mesh_step(loc_mesh, self.verbose) for loc_mesh in tqdm(self.list_mesh_paths)]
 
         # remove mesh paths that failed to load
         self.list_mesh_paths = [x for idx, x in enumerate(self.list_mesh_paths) if self.data[idx] is not None]
@@ -1298,7 +1310,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
         norm_pts=False,
         scale_method='max_rad',
         scale_jointly=False,
-        loc_save=os.environ['LOC_SDF_CACHE'],
+        loc_save=os.environ.get('LOC_SDF_CACHE', '/tmp'),
         include_seed_in_hash=True,
         save_cache=True,
         load_cache=True,
